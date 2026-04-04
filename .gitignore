@@ -1,0 +1,12 @@
+# Rust
+/target
+
+# RuStress Artifacts
+*.csv
+*.json
+
+# Editor / System
+.DS_Store
+.idea/
+.vscode/
+.antigravity/
