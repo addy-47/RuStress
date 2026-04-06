@@ -1,0 +1,13 @@
+[package]
+name = "rustress-metrics"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Thread-safe metrics collector and HDR histogram wrapper"
+
+[dependencies]
+rustress-core = { path = "../core" }
+hdrhistogram.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+indexmap.workspace = true
