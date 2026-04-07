@@ -1,0 +1,19 @@
+[package]
+name = "rustress-runner"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Load generation engine — RPS, Users modes, HTTP and script execution"
+
+[dependencies]
+rustress-core = { path = "../core" }
+rustress-metrics = { path = "../metrics" }
+rustress-templates = { path = "../templates" }
+tokio.workspace = true
+tokio-util.workspace = true
+reqwest.workspace = true
+uuid.workspace = true
+parking_lot.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
