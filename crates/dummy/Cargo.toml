@@ -1,0 +1,15 @@
+[package]
+name = "rustress-dummy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Built-in test HTTP server with varied endpoints"
+
+[dependencies]
+axum.workspace = true
+tokio.workspace = true
+rand.workspace = true
+tracing.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+anyhow.workspace = true
