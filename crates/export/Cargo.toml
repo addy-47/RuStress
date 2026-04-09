@@ -1,0 +1,15 @@
+[package]
+name = "rustress-export"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Report generation — CSV, JSON, and summary exports"
+
+[dependencies]
+rustress-core = { path = "../core" }
+rustress-metrics = { path = "../metrics" }
+serde.workspace = true
+serde_json.workspace = true
+csv.workspace = true
+chrono.workspace = true
+anyhow.workspace = true
