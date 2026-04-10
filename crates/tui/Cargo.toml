@@ -1,0 +1,17 @@
+[package]
+name = "rustress-tui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Interactive terminal UI built with ratatui and crossterm"
+
+[dependencies]
+rustress-core = { path = "../core" }
+rustress-runner = { path = "../runner" }
+ratatui.workspace = true
+crossterm.workspace = true
+tui-input.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
