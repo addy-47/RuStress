@@ -1,0 +1,30 @@
+[package]
+name = "rustress"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "High-performance load testing engine with interactive TUI"
+default-run = "rustress"
+
+[[bin]]
+name = "rustress"
+path = "src/main.rs"
+
+[dependencies]
+rustress-core = { path = "../core" }
+rustress-runner = { path = "../runner" }
+rustress-tui = { path = "../tui" }
+rustress-export = { path = "../export" }
+rustress-dummy = { path = "../dummy" }
+rustress-metrics = { path = "../metrics" }
+rustress-templates = { path = "../templates" }
+clap.workspace = true
+indicatif.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+crossterm.workspace = true
+serde_json.workspace = true
+csv.workspace = true
+chrono.workspace = true
+anyhow.workspace = true
+toml.workspace = true
