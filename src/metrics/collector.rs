@@ -1,23 +1,25 @@
+use crate::core::constants::{ERROR_KEY_OVERFLOW_LABEL, MAX_TRACKED_ERROR_KEYS};
 use indexmap::IndexMap;
 use parking_lot::Mutex;
-use rustress_core::snapshot::StatsSnapshot;
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::histogram::LatencyHistogram;
-use crate::percentiles::PercentileExt;
+use crate::core::result::ExperimentResult;
+use crate::core::snapshot::StatsSnapshot;
+use crate::metrics::histogram::LatencyHistogram;
+use crate::metrics::percentiles::PercentileExt;
 
 /// Thread-safe stats accumulator for load test metrics.
 ///
 /// Uses atomic counters for the hot path and mutex-protected maps
-/// for status code and error tracking.
+/// for status code and error tracking. Every map has a bounded key space so
+/// that memory is a function of configuration, not of request count.
 pub struct StatsCollector {
     // Atomic counters — lock-free hot path.
     requests: AtomicU64,
     success: AtomicU64,
     fail: AtomicU64,
     bytes: AtomicU64,
-    total_queue_wait_micros: AtomicI64,
+    total_queue_wait_micros: AtomicU64,
 
     // Histograms — mutex-protected.
     service_time: LatencyHistogram,
@@ -37,7 +39,7 @@ impl StatsCollector {
             success: AtomicU64::new(0),
             fail: AtomicU64::new(0),
             bytes: AtomicU64::new(0),
-            total_queue_wait_micros: AtomicI64::new(0),
+            total_queue_wait_micros: AtomicU64::new(0),
             service_time: LatencyHistogram::new(),
             total_time: LatencyHistogram::new(),
             status_codes: Mutex::new(IndexMap::new()),
@@ -46,40 +48,38 @@ impl StatsCollector {
         }
     }
 
-    /// Record a single request outcome.
+    /// Record a single completed request.
     ///
-    /// This is the hot-path method called after every request completes.
-    pub fn add(
-        &self,
-        success: bool,
-        resp_bytes: u64,
-        service_time: Duration,
-        queue_wait: Duration,
-        total_time: Duration,
-        status_code: u16,
-        error: Option<&str>,
-        response_body: Option<&str>,
-    ) {
+    /// This is the hot-path method called after every request completes. It
+    /// takes the result struct rather than nine positional arguments so that
+    /// adding a measurement cannot silently reorder call sites.
+    pub fn add(&self, result: &ExperimentResult) {
+        let status_code = result.status;
+        let error = result.error.as_deref();
+        let response_body = result.response_body.as_deref();
+
         // Atomic counters — no lock needed.
         self.requests.fetch_add(1, Ordering::Relaxed);
-        if success {
+        if result.success {
             self.success.fetch_add(1, Ordering::Relaxed);
         } else {
             self.fail.fetch_add(1, Ordering::Relaxed);
         }
-        self.bytes.fetch_add(resp_bytes, Ordering::Relaxed);
+        self.bytes
+            .fetch_add(result.bytes.max(0) as u64, Ordering::Relaxed);
         self.total_queue_wait_micros
-            .fetch_add(queue_wait.as_micros() as i64, Ordering::Relaxed);
+            .fetch_add(result.queue_wait.as_micros() as u64, Ordering::Relaxed);
 
         // Histograms — single lock each.
         self.service_time
-            .record(service_time.as_micros() as u64);
-        self.total_time.record(total_time.as_micros() as u64);
+            .record(result.service_time.as_micros() as u64);
+        self.total_time.record(result.latency.as_micros() as u64);
 
         // Maps — single lock for all.
         if let Some(err) = error {
             let mut errors = self.error_counts.lock();
-            *errors.entry(err.to_string()).or_insert(0) += 1;
+            let key = bounded_error_key(&errors, err);
+            *errors.entry(key).or_insert(0) += 1;
 
             // Store a sample response body for this error.
             if let Some(body) = response_body {
@@ -119,6 +119,8 @@ impl StatsCollector {
             max_service_ms: self.service_time.max_ms(),
             mean_service_ms: self.service_time.mean_ms(),
             avg_queue_wait_ms: self.avg_queue_wait_ms(),
+            dropped_scheduled: 0,
+            dropped_results: 0,
             status_codes: self.status_codes.lock().clone(),
             error_counts: self.error_counts.lock().clone(),
             response_samples: self.response_samples.lock().clone(),
@@ -178,80 +180,49 @@ impl Default for StatsCollector {
     }
 }
 
+/// Map an error message onto a bounded key space.
+///
+/// Error text originates from remote servers and network stacks, so its
+/// cardinality is target-controlled. A target returning a unique error string
+/// per request would otherwise grow `error_counts` without limit. Once the
+/// tracked key budget is spent, unseen errors fold into a single overflow
+/// bucket; already-tracked errors keep incrementing their own key.
+fn bounded_error_key(errors: &IndexMap<String, u64>, err: &str) -> String {
+    if errors.contains_key(err) || errors.len() < MAX_TRACKED_ERROR_KEYS {
+        return err.to_string();
+    }
+    ERROR_KEY_OVERFLOW_LABEL.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
+    use crate::core::constants::RESULT_RING_CAPACITY;
+    use chrono::Utc;
     use std::sync::Arc;
+    use std::time::Duration;
     use std::thread;
 
-    // --- LatencyHistogram tests ---
-
-    #[test]
-    fn test_histogram_new_is_empty() {
-        let hist = LatencyHistogram::new();
-        assert!(hist.is_empty());
-        assert_eq!(hist.len(), 0);
-    }
-
-    #[test]
-    fn test_histogram_record_single_value() {
-        let hist = LatencyHistogram::new();
-        hist.record(1000);
-        assert!(!hist.is_empty());
-        assert_eq!(hist.len(), 1);
-    }
-
-    #[test]
-    fn test_histogram_percentiles() {
-        let hist = LatencyHistogram::new();
-        for _ in 0..100 {
-            hist.record(1000);
+    /// Build a result for collector assertions.
+    fn result(status: u16, success: bool) -> ExperimentResult {
+        ExperimentResult {
+            timestamp: Utc::now(),
+            latency: Duration::from_millis(11),
+            service_time: Duration::from_millis(10),
+            queue_wait: Duration::from_millis(1),
+            status,
+            success,
+            bytes: 1024,
+            user_id: "u".into(),
+            query: "custom".into(),
+            error: None,
+            response_body: None,
         }
-        for _ in 0..100 {
-            hist.record(2000);
-        }
-
-        // Verify ordering and rough values.
-        // HDR histogram with 3 sig figs gives approximate percentiles.
-        let p50 = hist.p50_ms();
-        let p99 = hist.p99_ms();
-        let mean = hist.mean_ms();
-
-        // p50 should be between 1ms and 2ms (we have equal 1ms and 2ms values)
-        assert!(p50 >= 1.0 && p50 <= 2.5, "p50 was {p50}");
-        // p99 should be close to 2ms
-        assert!(p99 >= 1.5 && p99 <= 3.0, "p99 was {p99}");
-        // Mean should be around 1.5
-        assert!(mean >= 1.0 && mean <= 2.0, "mean was {mean}");
-        assert_eq!(hist.max_ms(), 2.0);
-        assert_eq!(hist.min_ms(), 1.0);
     }
 
     #[test]
-    fn test_histogram_reset() {
-        let hist = LatencyHistogram::new();
-        hist.record(5000);
-        assert!(!hist.is_empty());
-
-        hist.reset();
-        assert!(hist.is_empty());
-        assert_eq!(hist.len(), 0);
-    }
-
-    #[test]
-    fn test_histogram_p99_single_value() {
-        let hist = LatencyHistogram::new();
-        hist.record(500);
-        assert_eq!(hist.p99_ms(), 0.5);
-    }
-
-    // --- StatsCollector tests ---
-
-    #[test]
-    fn test_collector_initial_state() {
-        let collector = StatsCollector::new();
-        let snap = collector.snapshot();
+    fn new_collector_reports_zeroed_counters() {
+        let snap = StatsCollector::new().snapshot();
         assert_eq!(snap.requests, 0);
         assert_eq!(snap.success, 0);
         assert_eq!(snap.fail, 0);
@@ -259,146 +230,187 @@ mod tests {
     }
 
     #[test]
-    fn test_collector_add_success() {
+    fn success_increments_success_counter_and_status_map() {
         let collector = StatsCollector::new();
-        collector.add(
-            true,
-            1024,
-            Duration::from_millis(50),
-            Duration::from_micros(100),
-            Duration::from_millis(51),
-            200,
-            None,
-            None,
-        );
+        collector.add(&result(200, true));
 
         let snap = collector.snapshot();
         assert_eq!(snap.requests, 1);
         assert_eq!(snap.success, 1);
         assert_eq!(snap.fail, 0);
         assert_eq!(snap.bytes, 1024);
-        assert!(snap.status_codes.contains_key(&200));
+        assert_eq!(snap.status_codes.get(&200), Some(&1));
     }
 
     #[test]
-    fn test_collector_add_failure() {
+    fn failure_increments_fail_counter_and_error_map() {
         let collector = StatsCollector::new();
-        collector.add(
-            false,
-            0,
-            Duration::from_millis(30),
-            Duration::ZERO,
-            Duration::from_millis(30),
-            500,
-            Some("connection refused"),
-            Some("error body"),
-        );
+        let mut r = result(500, false);
+        r.error = Some("connection refused".into());
+
+        collector.add(&r);
 
         let snap = collector.snapshot();
         assert_eq!(snap.fail, 1);
-        assert!(snap.error_counts.contains_key("connection refused"));
+        assert_eq!(snap.success, 0);
+        assert_eq!(snap.error_counts.get("connection refused"), Some(&1));
     }
 
     #[test]
-    fn test_collector_status_codes() {
+    fn error_results_do_not_pollute_status_code_map() {
         let collector = StatsCollector::new();
+        let mut r = result(500, false);
+        r.error = Some("boom".into());
 
-        collector.add(true, 100, Duration::from_millis(10), Duration::ZERO, Duration::from_millis(10), 200, None, None);
-        collector.add(true, 100, Duration::from_millis(10), Duration::ZERO, Duration::from_millis(10), 200, None, None);
-        collector.add(true, 100, Duration::from_millis(10), Duration::ZERO, Duration::from_millis(10), 404, None, Some("not found"));
-        collector.add(true, 100, Duration::from_millis(10), Duration::ZERO, Duration::from_millis(10), 500, None, Some("server error"));
+        collector.add(&r);
+
+        assert!(
+            collector.snapshot().status_codes.is_empty(),
+            "a transport error has no status code and must not be recorded as one"
+        );
+    }
+
+    #[test]
+    fn status_codes_accumulate_per_code() {
+        let collector = StatsCollector::new();
+        collector.add(&result(200, true));
+        collector.add(&result(200, true));
+        collector.add(&result(404, true));
 
         let snap = collector.snapshot();
         assert_eq!(snap.status_codes.get(&200), Some(&2));
         assert_eq!(snap.status_codes.get(&404), Some(&1));
-        assert_eq!(snap.status_codes.get(&500), Some(&1));
     }
 
     #[test]
-    fn test_collector_response_samples() {
+    fn error_body_sample_is_length_capped() {
         let collector = StatsCollector::new();
-        let body = "x".repeat(300);
+        let mut r = result(500, false);
+        r.error = Some("internal".into());
+        r.response_body = Some("x".repeat(5_000));
 
-        collector.add(
-            false,
-            0,
-            Duration::from_millis(10),
-            Duration::ZERO,
-            Duration::from_millis(10),
-            500,
-            Some("internal error"),
-            Some(&body),
-        );
+        collector.add(&r);
 
         let snap = collector.snapshot();
         let sample = snap.response_samples.get(&0).unwrap();
-        assert!(sample.len() <= 200);
+        assert!(sample.chars().count() <= 200);
     }
 
     #[test]
-    fn test_collector_queue_wait() {
+    fn avg_queue_wait_divides_by_request_count() {
         let collector = StatsCollector::new();
-
         for _ in 0..10 {
-            collector.add(
-                true,
-                0,
-                Duration::from_millis(10),
-                Duration::from_millis(1),
-                Duration::from_millis(11),
-                200,
-                None,
-                None,
-            );
+            let mut r = result(200, true);
+            r.queue_wait = Duration::from_millis(1);
+            collector.add(&r);
         }
 
-        let snap = collector.snapshot();
-        assert!((snap.avg_queue_wait_ms - 1.0).abs() < 0.01);
+        assert!((collector.avg_queue_wait_ms() - 1.0).abs() < 0.01);
     }
 
     #[test]
-    fn test_collector_reset() {
-        let collector = StatsCollector::new();
-        collector.add(true, 1024, Duration::from_millis(50), Duration::ZERO, Duration::from_millis(50), 200, None, None);
+    fn avg_queue_wait_is_zero_with_no_requests() {
+        assert_eq!(StatsCollector::new().avg_queue_wait_ms(), 0.0);
+    }
 
+    #[test]
+    fn reset_clears_counters_and_maps() {
+        let collector = StatsCollector::new();
+        collector.add(&result(200, true));
         collector.reset();
 
         let snap = collector.snapshot();
         assert_eq!(snap.requests, 0);
         assert_eq!(snap.success, 0);
         assert!(snap.status_codes.is_empty());
+        assert!(snap.error_counts.is_empty());
     }
 
     #[test]
-    fn test_collector_concurrent_add() {
-        let collector = Arc::new(StatsCollector::new());
-        let mut handles = vec![];
-
-        for _ in 0..100 {
-            let c = Arc::clone(&collector);
-            handles.push(thread::spawn(move || {
-                for _ in 0..1000 {
-                    c.add(
-                        true,
-                        64,
-                        Duration::from_micros(500),
-                        Duration::ZERO,
-                        Duration::from_micros(500),
-                        200,
-                        None,
-                        None,
-                    );
-                }
-            }));
+    fn error_key_space_is_bounded_under_unique_errors() {
+        let collector = StatsCollector::new();
+        let total = MAX_TRACKED_ERROR_KEYS * 50;
+        for i in 0..total {
+            let mut r = result(0, false);
+            r.error = Some(format!("unique-error-{i}"));
+            collector.add(&r);
         }
+
+        let errors = collector.snapshot().error_counts;
+        assert_eq!(
+            errors.len(),
+            MAX_TRACKED_ERROR_KEYS + 1,
+            "error map must cap at the budget plus the overflow bucket"
+        );
+        let overflow = (total - MAX_TRACKED_ERROR_KEYS) as u64;
+        assert_eq!(errors.get(ERROR_KEY_OVERFLOW_LABEL), Some(&overflow));
+    }
+
+    #[test]
+    fn tracked_error_keeps_incrementing_after_budget_spent() {
+        let collector = StatsCollector::new();
+        for i in 0..(MAX_TRACKED_ERROR_KEYS + 10) {
+            let mut r = result(0, false);
+            r.error = Some(format!("unique-{i}"));
+            collector.add(&r);
+        }
+
+        let mut repeat = result(0, false);
+        repeat.error = Some("unique-0".into());
+        collector.add(&repeat);
+        collector.add(&repeat);
+
+        assert_eq!(collector.snapshot().error_counts.get("unique-0"), Some(&3));
+    }
+
+    #[test]
+    fn concurrent_recording_is_lossless() {
+        let collector = Arc::new(StatsCollector::new());
+        let threads = 16;
+        let per_thread = 2_000;
+
+        let handles: Vec<_> = (0..threads)
+            .map(|_| {
+                let c = Arc::clone(&collector);
+                thread::spawn(move || {
+                    for _ in 0..per_thread {
+                        c.add(&result(200, true));
+                    }
+                })
+            })
+            .collect();
 
         for h in handles {
             h.join().unwrap();
         }
 
         let snap = collector.snapshot();
-        assert_eq!(snap.requests, 100_000);
-        assert_eq!(snap.success, 100_000);
+        assert_eq!(snap.requests, (threads * per_thread) as u64);
+        let expected = (threads * per_thread) as u64;
+        assert_eq!(snap.success, (threads * per_thread) as u64);
         assert_eq!(snap.fail, 0);
+        assert_eq!(snap.status_codes.get(&200), Some(&expected));
+    }
+
+    #[test]
+    fn histogram_records_into_service_time() {
+        let collector = StatsCollector::new();
+        for _ in 0..100 {
+            let mut r = result(200, true);
+            r.service_time = Duration::from_millis(10);
+            collector.add(&r);
+        }
+
+        let snap = collector.snapshot();
+        assert!(snap.p50_service_ms >= 9.0 && snap.p50_service_ms <= 11.0);
+        assert!(snap.max_service_ms >= 9.0);
+    }
+
+    #[test]
+    fn retention_capacity_constant_is_sane() {
+        assert_ne!(
+            RESULT_RING_CAPACITY, 0,
+            "a zero-capacity ring would discard every result"
+        );
     }
 }

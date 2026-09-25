@@ -10,6 +10,13 @@ pub struct StatsSnapshot {
     pub bytes: u64,
     pub inflight: i64,
 
+    /// Requests the scheduler could not dispatch because the concurrency
+    /// ceiling was saturated. Non-zero means the generator was the bottleneck.
+    pub dropped_scheduled: u64,
+
+    /// Per-request results evicted from the retention ring buffer.
+    pub dropped_results: u64,
+
     /// Pre-calculated percentiles (microseconds).
     pub p50_service_ms: f64,
     pub p90_service_ms: f64,
@@ -39,6 +46,8 @@ impl Default for StatsSnapshot {
             fail: 0,
             bytes: 0,
             inflight: 0,
+            dropped_scheduled: 0,
+            dropped_results: 0,
             p50_service_ms: 0.0,
             p90_service_ms: 0.0,
             p95_service_ms: 0.0,

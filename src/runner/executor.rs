@@ -1,17 +1,31 @@
-use reqwest::Client;
-use rustress_core::config::Config;
-use rustress_core::result::ExperimentResult;
-use rustress_templates::TemplateContext;
-use rustress_templates::TemplateEngine;
 use std::time::Instant;
+
+use reqwest::Response;
 use tokio::process::Command;
 
-use crate::stats::RunStats;
+use crate::core::config::Config;
+use crate::core::constants::{MAX_CAPTURED_BODY_BYTES, MAX_DRAINED_BODY_BYTES};
+use crate::core::result::ExperimentResult;
+use crate::runner::request::PreparedRequest;
+use crate::runner::stats::RunStats;
+use crate::templates::{TemplateContext, TemplateEngine};
 
-/// Execute a single HTTP request.
+/// Appended to a captured body that was cut short at the capture cap, so a
+/// truncated diagnostic is never mistaken for a complete one.
+const TRUNCATION_MARKER: &str = "\n...[truncated]";
+
+/// Outcome of a single HTTP exchange, with body capture already bounded.
+struct HttpOutcome {
+    status: u16,
+    bytes: u64,
+    captured_body: Option<String>,
+    error: Option<String>,
+}
+
+/// Execute a single HTTP request and fold the outcome into `stats`.
 pub async fn execute_http(
-    client: &Client,
-    cfg: &Config,
+    client: &reqwest::Client,
+    prepared: &PreparedRequest,
     engine: &TemplateEngine,
     ctx: &TemplateContext,
     scheduled: Instant,
@@ -20,102 +34,106 @@ pub async fn execute_http(
     let actual_start = Instant::now();
     let queue_wait = actual_start.saturating_duration_since(scheduled);
 
-    stats.inc_inflight();
-
-    let method = if cfg.method.is_empty() { "GET" } else { cfg.method.as_str() };
-
-    // Build URL
-    let url = if cfg.url.contains("{{") {
-        engine.execute_str(&cfg.url, ctx).unwrap_or_else(|_| cfg.url.clone())
-    } else {
-        cfg.url.clone()
-    };
-
-    // Build body
-    let body_str = if let Some(ref body) = cfg.body {
-        let body_text = if body.starts_with('@') {
-            let fname = body.strip_prefix('@').unwrap();
-            format!(r#"{{{{ read_file("{}") }}}}"#, fname)
-        } else {
-            body.clone()
-        };
-        engine.execute_str(&body_text, ctx).unwrap_or_else(|_| body.clone())
-    } else {
-        String::new()
-    };
-
-    // Build request
-    let mut req = client.request(
-        reqwest::Method::from_bytes(method.as_bytes()).unwrap_or(reqwest::Method::GET),
-        &url,
-    );
-
-    // Add headers
-    let has_content_type = cfg.headers.keys().any(|k| k.to_lowercase() == "content-type");
-    for (k, v) in &cfg.headers {
-        let val = if v.contains("{{") {
-            engine.execute_str(v, ctx).unwrap_or_else(|_| v.clone())
-        } else {
-            v.clone()
-        };
-        req = req.header(k, val);
-    }
-    if !has_content_type && !body_str.is_empty() {
-        req = req.header("Content-Type", "application/json");
-    }
-
-    if !body_str.is_empty() {
-        req = req.body(body_str);
-    }
-
-    // Execute
-    let (status, bytes_len, resp_body, err_str) = match req.send().await {
-        Ok(resp) => {
-            let status = resp.status().as_u16();
-            let bytes_len = resp.content_length().unwrap_or(0) as i64;
-
-            if status >= 400 {
-                match resp.text().await {
-                    Ok(body) => (status, bytes_len, Some(body), None),
-                    Err(e) => (status, bytes_len, None, Some(e.to_string())),
-                }
-            } else {
-                // Consume body for connection reuse.
-                let _ = resp.bytes().await;
-                (status, bytes_len, None, None)
-            }
-        }
-        Err(e) => {
-            let err_str = clean_error_msg(&e.to_string());
-            (0, 0, None, Some(err_str))
+    let request = match prepared.build(client, engine, ctx) {
+        Ok(request) => request,
+        Err(message) => {
+            stats.record(failed_outcome(
+                actual_start,
+                scheduled,
+                ctx,
+                0,
+                message,
+                None,
+            ));
+            return;
         }
     };
 
-    let end_time = Instant::now();
-    let service_time = end_time.duration_since(actual_start);
-    let total_latency = end_time.duration_since(scheduled);
+    let outcome = match request.send().await {
+        Ok(response) => read_response(response).await,
+        Err(e) => HttpOutcome {
+            status: 0,
+            bytes: 0,
+            captured_body: None,
+            error: Some(clean_error_msg(&e.to_string())),
+        },
+    };
 
-    let success = status >= 200 && status < 300;
-
-    let result = ExperimentResult {
+    let success = (200..300).contains(&outcome.status);
+    stats.record(ExperimentResult {
         timestamp: chrono::Utc::now(),
-        latency: total_latency,
-        service_time,
+        latency: Instant::now().saturating_duration_since(scheduled),
+        service_time: Instant::now().saturating_duration_since(actual_start),
         queue_wait,
-        status,
+        status: outcome.status,
         success,
-        bytes: bytes_len,
+        bytes: outcome.bytes as i64,
         user_id: ctx.user_id.clone(),
-        query: "custom".into(),
-        error: err_str.clone(),
-        response_body: resp_body,
-    };
-
-    stats.record(&result);
-    stats.dec_inflight();
+        query: prepared.label.clone(),
+        error: outcome.error,
+        response_body: outcome.captured_body,
+    });
 }
 
-/// Execute a single shell command.
+/// Drain a response body, counting bytes and capturing a bounded prefix.
+///
+/// The body is never fully materialised. Bytes are counted as they stream past
+/// so the throughput metric stays correct for chunked responses, which report
+/// no `content-length`. Capture stops at [`MAX_CAPTURED_BODY_BYTES`] because a
+/// load generator cannot trust the size of a body from a target it does not
+/// control.
+async fn read_response(mut response: Response) -> HttpOutcome {
+    let status = response.status().as_u16();
+    let mut bytes = 0u64;
+    let mut captured: Vec<u8> = Vec::new();
+    let mut truncated = false;
+    let mut stream_error = None;
+
+    loop {
+        match response.chunk().await {
+            Ok(Some(chunk)) => {
+                bytes += chunk.len() as u64;
+                if captured.len() < MAX_CAPTURED_BODY_BYTES {
+                    let room = MAX_CAPTURED_BODY_BYTES - captured.len();
+                    let take = room.min(chunk.len());
+                    captured.extend_from_slice(&chunk[..take]);
+                    if take < chunk.len() {
+                        truncated = true;
+                    }
+                } else {
+                    truncated = true;
+                }
+                if bytes >= MAX_DRAINED_BODY_BYTES {
+                    break;
+                }
+            }
+            Ok(None) => break,
+            Err(e) => {
+                stream_error = Some(clean_error_msg(&e.to_string()));
+                break;
+            }
+        }
+    }
+
+    let captured_body = if status >= 400 && !captured.is_empty() {
+        let mut text = String::from_utf8_lossy(&captured).into_owned();
+        if truncated {
+            text.push_str(TRUNCATION_MARKER);
+        }
+        Some(text)
+    } else {
+        None
+    };
+
+    HttpOutcome {
+        status,
+        bytes,
+        captured_body,
+        error: stream_error,
+    }
+}
+
+/// Execute a single shell command via `sh -c` and fold the outcome into `stats`.
 pub async fn execute_script(
     cfg: &Config,
     engine: &TemplateEngine,
@@ -126,83 +144,133 @@ pub async fn execute_script(
     let actual_start = Instant::now();
     let queue_wait = actual_start.saturating_duration_since(scheduled);
 
-    stats.inc_inflight();
-
-    // Template the command
-    let cmd_str = if cfg.command.as_ref().map_or(false, |c| c.contains("{{")) {
-        let cmd = cfg.command.as_deref().unwrap_or("");
-        engine.execute_str(cmd, ctx).unwrap_or_else(|_| cmd.to_string())
+    let raw = cfg.command.as_deref().unwrap_or_default();
+    let command = if raw.contains("{{") {
+        engine
+            .execute_str(raw, ctx)
+            .unwrap_or_else(|_| raw.to_string())
     } else {
-        cfg.command.clone().unwrap_or_default()
+        raw.to_string()
     };
 
-    // Execute via sh -c
-    let output = match Command::new("sh").arg("-c").arg(&cmd_str).output().await {
-        Ok(out) => out,
+    let output = match Command::new("sh").arg("-c").arg(&command).output().await {
+        Ok(output) => output,
         Err(e) => {
-            let service_time = Instant::now().duration_since(actual_start);
-            let total_latency = Instant::now().duration_since(scheduled);
-
-            let result = ExperimentResult {
-                timestamp: chrono::Utc::now(),
-                latency: total_latency,
-                service_time,
-                queue_wait,
-                status: 500,
-                success: false,
-                bytes: 0,
-                user_id: ctx.user_id.clone(),
-                query: "custom".into(),
-                error: Some(e.to_string()),
-                response_body: None,
-            };
-            stats.record(&result);
-            stats.dec_inflight();
+            stats.record(failed_outcome(
+                actual_start,
+                scheduled,
+                ctx,
+                0,
+                e.to_string(),
+                Some("shell".to_string()),
+            ));
             return;
         }
     };
 
-    let end_time = Instant::now();
-    let service_time = end_time.duration_since(actual_start);
-    let total_latency = end_time.duration_since(scheduled);
-
-    let exit_code = output.status.code().unwrap_or(500) as u16;
     let success = output.status.success();
-    let status = if success { 200 } else { exit_code };
+    let status = if success {
+        200
+    } else {
+        output.status.code().unwrap_or(500) as u16
+    };
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let error = (!success).then(|| clean_error_msg(&stderr));
+    let captured = (!success)
+        .then(|| truncate_capture(&stderr))
+        .filter(|s| !s.is_empty());
 
-    let result = ExperimentResult {
+    stats.record(ExperimentResult {
         timestamp: chrono::Utc::now(),
-        latency: total_latency,
-        service_time,
+        latency: Instant::now().saturating_duration_since(scheduled),
+        service_time: Instant::now().saturating_duration_since(actual_start),
         queue_wait,
         status,
         success,
         bytes: output.stdout.len() as i64,
         user_id: ctx.user_id.clone(),
-        query: "custom".into(),
-        error: if !success {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            Some(clean_error_msg(&stderr))
-        } else {
-            None
-        },
-        response_body: if !success {
-            Some(String::from_utf8_lossy(&output.stderr).into_owned())
-        } else {
-            None
-        },
-    };
-
-    stats.record(&result);
-    stats.dec_inflight();
+        query: "script".to_string(),
+        error,
+        response_body: captured,
+    });
 }
 
-/// Clean up error messages to remove redundant prefixes.
-fn clean_error_msg(msg: &str) -> String {
-    if let Some(idx) = msg.rfind(": ") {
-        if msg.contains("dial") || msg.contains("timeout") || msg.contains("connect") {
-            return msg[idx + 2..].to_string();
+/// Build a failed result for a request that never reached the wire.
+fn failed_outcome(
+    actual_start: Instant,
+    scheduled: Instant,
+    ctx: &TemplateContext,
+    status: u16,
+    error: String,
+    query: Option<String>,
+) -> ExperimentResult {
+    ExperimentResult {
+        timestamp: chrono::Utc::now(),
+        latency: Instant::now().saturating_duration_since(scheduled),
+        service_time: Instant::now().saturating_duration_since(actual_start),
+        queue_wait: actual_start.saturating_duration_since(scheduled),
+        status,
+        success: false,
+        bytes: 0,
+        user_id: ctx.user_id.clone(),
+        query: query.unwrap_or_else(|| "custom".to_string()),
+        error: Some(error),
+        response_body: None,
+    }
+}
+
+/// Truncate a diagnostic string to the capture cap.
+fn truncate_capture(text: &str) -> String {
+    text.chars().take(MAX_CAPTURED_BODY_BYTES).collect()
+}
+
+/// Strip redundant transport prefixes from a reqwest error message.
+fn clean_error_msg(message: &str) -> String {
+    let interesting = message.contains("dial")
+        || message.contains("timeout")
+        || message.contains("connect");
+    if interesting {
+        if let Some(idx) = message.rfind(": ") {
+            return message[idx + 2..].to_string();
         }
     }
-    msg.to_string()
+    message.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clean_error_msg_strips_transport_prefix() {
+        assert_eq!(
+            clean_error_msg("error sending request for url (http://x/): connection refused"),
+            "connection refused"
+        );
+    }
+
+    #[test]
+    fn clean_error_msg_preserves_uninteresting_message() {
+        let msg = "builder error: invalid header";
+        assert_eq!(clean_error_msg(msg), msg);
+    }
+
+    #[test]
+    fn truncate_capture_bounds_length() {
+        let huge = "a".repeat(MAX_CAPTURED_BODY_BYTES * 4);
+        let capped = truncate_capture(&huge);
+        assert_eq!(capped.chars().count(), MAX_CAPTURED_BODY_BYTES);
+    }
+
+    #[test]
+    fn truncate_capture_passes_short_text_through() {
+        assert_eq!(truncate_capture("boom"), "boom");
+    }
+
+    #[test]
+    fn truncate_capture_respects_char_boundaries() {
+        let multibyte = "é".repeat(MAX_CAPTURED_BODY_BYTES);
+        let capped = truncate_capture(&multibyte);
+        assert_eq!(capped.chars().count(), MAX_CAPTURED_BODY_BYTES);
+    }
 }

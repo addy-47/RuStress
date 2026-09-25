@@ -2,20 +2,19 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
+use crate::core::constants::{
+    MAX_ALLOWED_CONCURRENCY, MAX_ALLOWED_RPS, MAX_ALLOWED_USERS, MIN_ALLOWED_CONCURRENCY,
+};
+
 /// Load generation mode.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Mode {
     /// Open loop — target RPS with time-based scheduling.
+    #[default]
     Rps,
     /// Closed loop — fixed number of virtual users looping.
     Users,
-}
-
-impl Default for Mode {
-    fn default() -> Self {
-        Self::Rps
-    }
 }
 
 /// Load test configuration.
@@ -106,24 +105,61 @@ impl Config {
         Duration::from_secs(self.ramp_up_secs + self.steady_dur_secs + self.ramp_down_secs)
     }
 
-    /// Validate configuration.
+    /// Validate configuration, rejecting values that would deadlock the engine
+    /// or exhaust host resources.
     pub fn validate(&self) -> Result<(), Vec<String>> {
         let mut errors = Vec::new();
 
         if self.mode == Mode::Rps && self.target_rps == 0 {
             errors.push("target_rps must be greater than 0 in RPS mode".into());
         }
+        if self.target_rps > MAX_ALLOWED_RPS {
+            errors.push(format!(
+                "target_rps must be at most {MAX_ALLOWED_RPS} (got {})",
+                self.target_rps
+            ));
+        }
 
         if self.mode == Mode::Users && self.num_users == 0 {
             errors.push("num_users must be greater than 0 in Users mode".into());
+        }
+        if self.num_users > MAX_ALLOWED_USERS {
+            errors.push(format!(
+                "num_users must be at most {MAX_ALLOWED_USERS} (got {})",
+                self.num_users
+            ));
         }
 
         if self.steady_dur_secs == 0 {
             errors.push("steady_dur_secs must be greater than 0".into());
         }
 
+        // A zero-permit semaphore deadlocks the engine: every request blocks
+        // forever and the run never terminates.
+        if self.max_concurrency < MIN_ALLOWED_CONCURRENCY {
+            errors.push(format!(
+                "max_concurrency must be at least {MIN_ALLOWED_CONCURRENCY} (got {})",
+                self.max_concurrency
+            ));
+        }
+        if self.max_concurrency > MAX_ALLOWED_CONCURRENCY {
+            errors.push(format!(
+                "max_concurrency must be at most {MAX_ALLOWED_CONCURRENCY} (got {})",
+                self.max_concurrency
+            ));
+        }
+
+        if self.timeout_secs == 0 {
+            errors.push("timeout_secs must be greater than 0".into());
+        }
+
         if self.url.is_empty() && self.command.is_none() {
             errors.push("either url or command must be specified".into());
+        } else if !self.url.is_empty() && !has_http_scheme(&self.url) {
+            errors.push(format!(
+                "url must be absolute and start with http:// or https:// (got {})",
+                self.url
+            ));
         }
 
         if errors.is_empty() {
@@ -132,6 +168,15 @@ impl Config {
             Err(errors)
         }
     }
+}
+
+/// Whether a URL carries an absolute HTTP scheme.
+///
+/// Kept dependency-free so `core` stays a leaf module; full parsing is left to
+/// the HTTP client at request time.
+fn has_http_scheme(url: &str) -> bool {
+    let lowered = url.to_ascii_lowercase();
+    lowered.starts_with("http://") || lowered.starts_with("https://")
 }
 
 fn default_method() -> String {
@@ -155,7 +200,7 @@ fn default_num_users() -> u32 {
 }
 
 fn default_max_concurrency() -> u32 {
-    1000
+    crate::core::constants::DEFAULT_MAX_CONCURRENCY
 }
 
 #[cfg(test)]

@@ -4,8 +4,8 @@ use rand::Rng;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::cache::FileCache;
-use crate::context::TemplateContext;
+use super::cache::FileCache;
+use super::context::TemplateContext;
 
 /// Pre-parsed template ready for execution.
 pub type ParsedTemplate = Arc<String>;

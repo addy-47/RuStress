@@ -1,4 +1,4 @@
-use rustress_core::config::Config;
+use crate::core::config::Config;
 
 /// Calculate the current target RPS at a given elapsed time.
 ///

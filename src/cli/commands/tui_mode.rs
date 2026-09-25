@@ -1,15 +1,15 @@
-use rustress_core::config::Config;
-use rustress_runner::LoadEngine;
+use crate::core::config::Config;
+use crate::runner::LoadEngine;
 use tokio::sync::mpsc;
 
 /// Run in interactive TUI mode.
 pub async fn run_tui(cfg: Config) -> anyhow::Result<()> {
     // No banner in TUI mode — the TUI itself is the interface
     let (tx, rx) = mpsc::unbounded_channel();
-    let engine = LoadEngine::new(cfg.clone(), tx);
+    let engine = LoadEngine::new(cfg.clone(), tx)?;
 
     // Run TUI
-    rustress_tui::run_tui(cfg, rx).await?;
+    crate::tui::run_tui(cfg, rx).await?;
 
     // After TUI exits, print summary if there are results
     let results = engine.stats().get_results();
@@ -20,7 +20,7 @@ pub async fn run_tui(cfg: Config) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn print_summary(results: &[rustress_core::result::ExperimentResult]) {
+fn print_summary(results: &[crate::core::result::ExperimentResult]) {
     let total = results.len();
     let success = results.iter().filter(|r| r.success).count();
     let fail = total - success;

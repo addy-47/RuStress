@@ -60,7 +60,7 @@ fn report_from_csv(path: &str) -> anyhow::Result<()> {
 
 fn report_from_json(path: &str) -> anyhow::Result<()> {
     let data = std::fs::read_to_string(path)?;
-    let results: Vec<rustress_core::result::ExperimentResult> = serde_json::from_str(&data)?;
+    let results: Vec<crate::core::result::ExperimentResult> = serde_json::from_str(&data)?;
 
     let total = results.len() as u64;
     let success = results.iter().filter(|r| r.success).count() as u64;

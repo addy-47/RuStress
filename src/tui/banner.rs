@@ -2,7 +2,7 @@
 ///
 /// Block letters with a gradient-like dual-tone (cyan → purple).
 pub fn banner() -> String {
-    let version = rustress_core::constants::VERSION;
+    let version = crate::core::constants::VERSION;
     format!(
         "\x1b[38;2;196;248;245m██████╗ ██╗   ██╗███████╗████████╗██████╗ ███████╗███████╗\x1b[0m
 \x1b[38;2;173;226;224m██╔══██╗██║   ██║██╔════╝╚══██╔══╝██╔══██╗██╔════╝██╔════╝\x1b[0m
@@ -16,7 +16,7 @@ pub fn banner() -> String {
 
 /// Compact inline banner for CLI help (shorter width).
 pub fn short_banner() -> String {
-    let version = rustress_core::constants::VERSION;
+    let version = crate::core::constants::VERSION;
     format!(
         "\x1b[1;36m  RUSTRESS\x1b[0m \x1b[38;5;147mv{version}\x1b[0m\n"
     )

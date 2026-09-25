@@ -1,9 +1,13 @@
 # Rust
 /target
 
-# RuStress Artifacts
+# RuStress report artifacts
 *.csv
 *.json
+
+# Agent scratch
+/temp
+*.log
 
 # Editor / System
 .DS_Store

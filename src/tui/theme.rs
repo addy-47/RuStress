@@ -61,7 +61,7 @@ impl Theme {
         if let Ok(val) = std::env::var("COLORFGBG") {
             if let Some(parts) = val.rsplit_once(';') {
                 if let Ok(bg) = parts.1.parse::<i32>() {
-                    return bg < 7 || bg >= 234;
+                    return !(7..234).contains(&bg);
                 }
             }
         }

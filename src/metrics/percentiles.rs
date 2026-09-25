@@ -1,4 +1,4 @@
-use crate::histogram::LatencyHistogram;
+use super::histogram::LatencyHistogram;
 
 /// Percentile extraction helper for latency histograms.
 ///

@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
-use rustress_core::config::{Config, Mode};
-use rustress_core::constants::VERSION;
+use crate::core::config::{Config, Mode};
+use crate::core::constants::VERSION;
 use std::path::Path;
 
 const HELP_BANNER: &str = concat!(

@@ -1,4 +1,4 @@
-use rustress_dummy::server::DummyServer;
+use crate::dummy::server::DummyServer;
 
 /// Start the built-in test HTTP server.
 pub async fn run(port: u16) -> anyhow::Result<()> {

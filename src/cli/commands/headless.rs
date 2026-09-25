@@ -1,8 +1,8 @@
 use indicatif::{ProgressBar, ProgressStyle};
-use rustress_core::config::Config;
-use rustress_core::constants::PROGRESS_UPDATE_INTERVAL_MS;
-use rustress_core::snapshot::StatsSnapshot;
-use rustress_runner::LoadEngine;
+use crate::core::config::Config;
+use crate::core::constants::PROGRESS_UPDATE_INTERVAL_MS;
+use crate::core::snapshot::StatsSnapshot;
+use crate::runner::LoadEngine;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc;
@@ -11,11 +11,11 @@ use tokio_util::sync::CancellationToken;
 /// Run in headless (non-TUI) mode with text progress bar.
 pub async fn run_headless(cfg: Config) -> anyhow::Result<()> {
     // Print banner
-    println!("{}", rustress_tui::banner());
+    println!("{}", crate::tui::banner());
     println!("  URL:          {}", cfg.url);
     println!("  Method:       {}", cfg.method);
     println!("  Mode:         {:?}", cfg.mode);
-    if cfg.mode == rustress_core::config::Mode::Rps {
+    if cfg.mode == crate::core::config::Mode::Rps {
         println!("  Target RPS:   {}", cfg.target_rps);
     } else {
         println!("  Users:        {}", cfg.num_users);
@@ -30,7 +30,7 @@ pub async fn run_headless(cfg: Config) -> anyhow::Result<()> {
     println!();
 
     let (tx, rx) = mpsc::unbounded_channel();
-    let engine = LoadEngine::new(cfg.clone(), tx);
+    let engine = LoadEngine::new(cfg.clone(), tx)?;
     let stats = Arc::clone(engine.stats());
 
     let cancel = CancellationToken::new();
@@ -134,6 +134,25 @@ fn print_summary(snap: &StatsSnapshot) {
     println!("  P95 Latency:    {:.1}ms", snap.p95_service_ms);
     println!("  P99 Latency:    {:.1}ms", snap.p99_service_ms);
     println!("  Max Latency:    {:.1}ms", snap.max_service_ms);
+    println!("  Avg Queue Wait: {:.1}ms", snap.avg_queue_wait_ms);
+
+    // A non-zero drop count means the generator, not the target, was the
+    // bottleneck. The latency figures above do not describe the target, so this
+    // must not be buried in a report file.
+    if snap.dropped_scheduled > 0 {
+        let scheduled = total + snap.dropped_scheduled;
+        println!();
+        println!("  ⚠ MEASUREMENT INVALID");
+        println!("    {} of {} scheduled requests were shed because the", snap.dropped_scheduled, scheduled);
+        println!("    concurrency ceiling was saturated. The generator was the");
+        println!("    bottleneck, not the target. Raise --max-concurrency or");
+        println!("    lower --rate, then re-run.");
+    }
+    if snap.dropped_results > 0 {
+        println!();
+        println!("  Results:        {} evicted from the retention ring", snap.dropped_results);
+        println!("    (report contains only the most recent samples)");
+    }
 
     if !snap.error_counts.is_empty() {
         println!();
@@ -154,23 +173,23 @@ fn print_summary(snap: &StatsSnapshot) {
     println!("{}", "═".repeat(60));
 }
 
-fn export_reports(results: &[rustress_core::result::ExperimentResult], prefix: &str) -> anyhow::Result<()> {
+fn export_reports(results: &[crate::core::result::ExperimentResult], prefix: &str) -> anyhow::Result<()> {
     let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S");
     let base = format!("{}_{}", prefix, ts);
 
     // CSV
     let csv_path = format!("{}.csv", base);
-    rustress_export::export_csv(results, &csv_path)?;
+    crate::export::export_csv(results, &csv_path)?;
     println!("  Exported: {}", csv_path);
 
     // JSON
     let json_path = format!("{}.json", base);
-    rustress_export::export_json(results, &json_path)?;
+    crate::export::export_json(results, &json_path)?;
     println!("  Exported: {}", json_path);
 
     // Summary
     let summary_path = format!("{}_summary.json", base);
-    rustress_export::export_summary(results, &summary_path)?;
+    crate::export::export_summary(results, &summary_path)?;
     println!("  Exported: {}", summary_path);
 
     Ok(())

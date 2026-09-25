@@ -4,7 +4,7 @@ use ratatui::text::Span;
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 
-use crate::theme::Theme;
+use crate::tui::theme::Theme;
 
 /// Render a metric card (bordered box with title, value, and optional sparkline).
 pub fn render_metric_card(frame: &mut Frame<'_>, area: Rect, title: &str, value: &str, theme: &Theme) {

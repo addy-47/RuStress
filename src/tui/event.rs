@@ -1,4 +1,4 @@
-use rustress_core::snapshot::StatsSnapshot;
+use crate::core::snapshot::StatsSnapshot;
 use std::time::Instant;
 use tokio::sync::mpsc;
 

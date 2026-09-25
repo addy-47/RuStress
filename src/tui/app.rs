@@ -1,20 +1,19 @@
-use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
-use ratatui::{Frame, Terminal};
-use std::io;
+use ratatui::Frame;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::event::EventLoop;
-use crate::theme::Theme;
-use crate::views::helpers::vertical_chunks;
-use crate::views::{DashboardView, RunnerView};
-use rustress_core::config::Config;
-use rustress_core::snapshot::StatsSnapshot;
+use super::EventLoop;
+use super::TerminalGuard;
+use super::Theme;
+use crate::tui::views::helpers::vertical_chunks;
+use crate::tui::views::{DashboardView, RunnerView};
+use crate::core::config::Config;
+use crate::core::snapshot::StatsSnapshot;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AppView {
@@ -309,15 +308,11 @@ pub async fn run_tui(
     cfg: Config,
     stats_rx: mpsc::UnboundedReceiver<StatsSnapshot>,
 ) -> anyhow::Result<()> {
-    let mut stdout = io::stdout();
-    crossterm::terminal::enable_raw_mode()?;
-    crossterm::execute!(
-        stdout,
-        crossterm::terminal::EnterAlternateScreen,
-        crossterm::event::EnableMouseCapture,
-    )?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
+    // The guard owns raw mode, the alternate screen, and mouse capture. It is
+    // dropped on every exit path, including `?` returns and panics, so the host
+    // terminal is never left unusable.
+    let guard = TerminalGuard::enter()?;
+    let mut terminal = guard.terminal()?;
 
     let mut app = App::new(cfg);
     let mut events = EventLoop::new(stats_rx);
@@ -349,13 +344,7 @@ pub async fn run_tui(
     if let Some(cancel) = app.cancel_token.take() {
         cancel.cancel();
     }
-    crossterm::terminal::disable_raw_mode()?;
-    crossterm::execute!(
-        terminal.backend_mut(),
-        crossterm::terminal::LeaveAlternateScreen,
-        crossterm::event::DisableMouseCapture,
-    )?;
-    terminal.show_cursor()?;
 
+    // Teardown happens in TerminalGuard::drop.
     Ok(())
 }

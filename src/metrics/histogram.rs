@@ -1,6 +1,6 @@
 use hdrhistogram::Histogram;
 use parking_lot::Mutex;
-use rustress_core::constants::{HISTOGRAM_HIGH_US, HISTOGRAM_LOW_US, HISTOGRAM_SIGFIGS};
+use crate::core::constants::{HISTOGRAM_HIGH_US, HISTOGRAM_LOW_US, HISTOGRAM_SIGFIGS};
 
 /// Thread-safe HDR histogram wrapper for latency recording.
 ///

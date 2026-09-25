@@ -6,9 +6,9 @@ use ratatui::Frame;
 use tui_input::Input;
 use tui_input::backend::crossterm::EventHandler;
 
-use crate::theme::Theme;
-use crate::views::helpers::vertical_chunks;
-use rustress_core::config::{Config, Mode};
+use crate::tui::theme::Theme;
+use super::helpers::vertical_chunks;
+use crate::core::config::{Config, Mode};
 
 /// Configuration form field indices.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -286,7 +286,7 @@ impl RunnerView {
             let row = (mouse.row as i32 - 1) / 2;
             let col = mouse.column / col_width;
 
-            if row >= 0 && row < 5 {
+            if (0..5).contains(&row) {
                 let idx = if col == 0 { row as usize } else { row as usize + 5 };
                 if idx < visible.len() {
                     self.focused_field = idx;
@@ -336,7 +336,7 @@ impl RunnerView {
     }
 
     pub fn render(&mut self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
-        use crate::views::helpers::horizontal_chunks;
+        use super::helpers::horizontal_chunks;
 
         if self.width < 70 || self.height < 16 {
             let block = Block::default()
@@ -434,13 +434,9 @@ impl RunnerView {
         // ── Info Area (Expanding on your feedback) ──
         if self.focused_field < visible.len() {
             let field = visible[self.focused_field];
-            let footer_chunks = vertical_chunks(
-                area,
-                vec![Constraint::Min(0), Constraint::Length(3), Constraint::Min(5)],
-            );
             // We use the last chunk of main_chunks from the parent layout
             let area = main_chunks[2];
-            
+
             let footer_split = vertical_chunks(
                 area,
                 vec![Constraint::Length(1), Constraint::Min(5)],

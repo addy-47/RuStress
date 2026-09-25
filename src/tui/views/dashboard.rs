@@ -4,11 +4,11 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Gauge, Paragraph, Sparkline};
 use ratatui::Frame;
 
-use crate::theme::Theme;
-use crate::views::helpers::{
+use crate::tui::theme::Theme;
+use super::helpers::{
     render_metric_card, status_badge_text, vertical_chunks, horizontal_chunks,
 };
-use rustress_core::snapshot::StatsSnapshot;
+use crate::core::snapshot::StatsSnapshot;
 use std::time::{Duration, Instant};
 
 /// Phase labels for the ramp profile.
@@ -258,7 +258,40 @@ impl DashboardView {
         );
         render_progress_gauge(frame, bottom_chunks[0], pct, elapsed, &self.duration, phase, theme);
         render_status_codes(frame, bottom_chunks[1], s, theme);
+        render_shed_notice(frame, frame.area(), s, theme);
     }
+}
+
+/// Warn when the generator — not the target — was the bottleneck.
+///
+/// A non-zero `dropped_scheduled` means concurrency was saturated and requests
+/// were shed. That invalidates the latency figures for the run, so it must be
+/// visible rather than buried in a report.
+fn render_shed_notice(frame: &mut Frame<'_>, area: Rect, s: &StatsSnapshot, theme: &Theme) {
+    if s.dropped_scheduled == 0 {
+        return;
+    }
+
+    let notice = format!(
+        " ⚠ {} REQUEST(S) SHED — generator saturated; raise --max-concurrency or lower the rate ",
+        s.dropped_scheduled
+    );
+    let width = (notice.chars().count() as u16).min(area.width);
+    if width < 20 || area.height < 1 {
+        return;
+    }
+
+    let strip = Rect {
+        x: area.x,
+        y: area.y,
+        width,
+        height: 1,
+    };
+    let style = Style::default()
+        .fg(theme.bg)
+        .bg(theme.warning)
+        .add_modifier(Modifier::BOLD);
+    frame.render_widget(Paragraph::new(notice).style(style), strip);
 }
 
 fn render_success_card(frame: &mut Frame<'_>, area: Rect, title: &str, value: &str, style: Style, theme: &Theme) {
