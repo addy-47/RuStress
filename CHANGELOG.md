@@ -7,14 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.1.1]
 
-> Post-release note: `concurrency_memory_test` as tagged could not pass on a CI
-> runner. It measured peak memory from `VmHWM` and reset the watermark via
-> `/proc/self/clear_refs` while discarding the error; where that write is not
-> permitted the watermark never reset, so the second configuration's peak was
-> clamped to be at least the first's and the assertion compared a value with
-> itself. It passed three times locally and failed on the first CI run. Fixed on
-> `master` by sampling resident memory instead. The 0.1.1 crate itself is
-> unaffected — the defect is in the test's measurement, not the product.
+> Post-release note: the memory assertion in `concurrency_memory_test` as
+> tagged could not hold in CI, and three successive attempts to make it hold
+> exposed why it never should have been written that way. It tried to measure
+> peak RSS from inside the test process, where the zero-mock rule requires the
+> 8 MB-serving target to run too — so on CI the *higher* in-flight ceiling
+> measured *lower* (101820 KB vs 93284 KB), the server swamping the generator.
+> Earlier drafts read `VmRSS` at one instant, and read the monotonic `VmHWM` with
+> a `clear_refs` reset whose error was discarded. All passed locally, all failed
+> on CI. The relationship is real but only observable out-of-process.
+>
+> Fixed on `master` by dropping the relationship assertion and keeping the
+> deterministic part — the shipped default must imply a worst case inside a sane
+> budget — which allocates nothing and is mutation-validated. The measured table
+> is reproduced by `cargo run --release --example bounded_memory`. The 0.1.1
+> crate is unaffected: the defect was in the test's measurement, not the
+> product.
 
 Memory, hot path, and the interactive dashboard.
 

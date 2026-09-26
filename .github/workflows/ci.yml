@@ -80,9 +80,11 @@ jobs:
       - name: Cache
         uses: Swatinem/rust-cache@v2
       - name: Memory regression tests
-        run: |
-          cargo test --test memory_bound_test -- --ignored --test-threads=1
-          cargo test --test concurrency_memory_test -- --ignored --test-threads=1
+        # `concurrency_memory_test` is deterministic and allocates nothing, so it
+        # runs in the normal test job. Only `memory_bound_test` is opt-in: it
+        # serves 8 MB bodies and its positive control deliberately retains
+        # 30 x 8 MB to prove the RSS probe can see retention.
+        run: cargo test --test memory_bound_test -- --ignored --test-threads=1
 
   # Publishes only when a `v*` tag is PUSHED. Not on releases, not on branch
   # pushes -- crates.io rejects a version that already exists, so a
