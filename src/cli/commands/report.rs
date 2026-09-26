@@ -34,10 +34,17 @@ fn report_from_csv(path: &str) -> anyhow::Result<()> {
 
         let elapsed_us: u64 = record.get(1).and_then(|v| v.parse().ok()).unwrap_or(0);
         let status: u16 = record.get(3).and_then(|v| v.parse().ok()).unwrap_or(0);
-        let success_flag = record.get(7).and_then(|v| v.parse::<bool>().ok()).unwrap_or(false);
+        let success_flag = record
+            .get(7)
+            .and_then(|v| v.parse::<bool>().ok())
+            .unwrap_or(false);
         let error = record.get(8).and_then(|v| {
             let s = v.trim();
-            if s.is_empty() { None } else { Some(s.to_string()) }
+            if s.is_empty() {
+                None
+            } else {
+                Some(s.to_string())
+            }
         });
 
         if success_flag {
@@ -54,7 +61,14 @@ fn report_from_csv(path: &str) -> anyhow::Result<()> {
     }
 
     latencies.sort();
-    print_summary(total, success, fail, &latencies, &status_codes, &error_counts);
+    print_summary(
+        total,
+        success,
+        fail,
+        &latencies,
+        &status_codes,
+        &error_counts,
+    );
     Ok(())
 }
 
@@ -66,7 +80,10 @@ fn report_from_json(path: &str) -> anyhow::Result<()> {
     let success = results.iter().filter(|r| r.success).count() as u64;
     let fail = total - success;
 
-    let mut latencies: Vec<u64> = results.iter().map(|r| r.service_time.as_micros() as u64).collect();
+    let mut latencies: Vec<u64> = results
+        .iter()
+        .map(|r| r.service_time.as_micros() as u64)
+        .collect();
     latencies.sort();
 
     let mut status_codes = std::collections::HashMap::new();
@@ -80,7 +97,14 @@ fn report_from_json(path: &str) -> anyhow::Result<()> {
         }
     }
 
-    print_summary(total, success, fail, &latencies, &status_codes, &error_counts);
+    print_summary(
+        total,
+        success,
+        fail,
+        &latencies,
+        &status_codes,
+        &error_counts,
+    );
     Ok(())
 }
 
@@ -100,7 +124,10 @@ fn print_summary(
     println!("  Success:        {}", success);
     println!("  Failed:         {}", fail);
     if total > 0 {
-        println!("  Success Rate:   {:.1}%", success as f64 / total as f64 * 100.0);
+        println!(
+            "  Success Rate:   {:.1}%",
+            success as f64 / total as f64 * 100.0
+        );
     }
 
     if !latencies.is_empty() {

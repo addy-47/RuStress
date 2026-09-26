@@ -7,7 +7,7 @@ pub mod guard;
 pub mod theme;
 pub mod views;
 
-pub use app::{run_tui, App};
+pub use app::{App, run_tui};
 pub use banner::{banner, short_banner};
 pub use event::EventLoop;
 pub use guard::TerminalGuard;

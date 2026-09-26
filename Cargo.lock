@@ -1701,6 +1701,7 @@ dependencies = [
  "clap_complete",
  "crossterm",
  "csv",
+ "futures-util",
  "hdrhistogram",
  "indexmap",
  "indicatif",
@@ -1717,7 +1718,6 @@ dependencies = [
  "tokio-util",
  "toml",
  "tower",
- "tower-http",
  "tracing",
  "tracing-subscriber",
  "tui-input",
@@ -2205,7 +2205,6 @@ dependencies = [
  "tower",
  "tower-layer",
  "tower-service",
- "tracing",
 ]
 
 [[package]]

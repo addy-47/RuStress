@@ -1,7 +1,6 @@
-use clap::{Parser, Subcommand};
 use crate::core::config::{Config, Mode};
 use crate::core::constants::VERSION;
-use std::path::Path;
+use clap::{Parser, Subcommand};
 
 const HELP_BANNER: &str = concat!(
     "\x1b[38;2;196;248;245m██████╗ ██╗   ██╗███████╗████████╗██████╗ ███████╗███████╗\x1b[0m\n",
@@ -10,7 +9,9 @@ const HELP_BANNER: &str = concat!(
     "\x1b[38;2;127;182;182m██╔══██╗██║   ██║╚════██║   ██║   ██╔══██╗██╔══╝  ╚════██║\x1b[0m\n",
     "\x1b[38;2;104;160;161m██║  ██║╚██████╔╝███████║   ██║   ██║  ██║███████╗███████║\x1b[0m\n",
     "\x1b[38;2;79;137;139m╚═╝  ╚═╝ ╚═════╝ ╚══════╝   ╚═╝   ╚═╝  ╚═╝╚══════╝╚══════╝\x1b[0m\n",
-    "\x1b[38;2;196;248;245m            v", env!("CARGO_PKG_VERSION"), " | High-Performance Load Testing Engine\x1b[0m\n",
+    "\x1b[38;2;196;248;245m            v",
+    env!("CARGO_PKG_VERSION"),
+    " | High-Performance Load Testing Engine\x1b[0m\n",
     "\n",
     "🚀 Quick Start:\n",
     "  rustress --url http://localhost:8080 --rate 100 --duration 30    # RPS mode\n",
@@ -35,8 +36,8 @@ pub struct Cli {
     pub url: Option<String>,
 
     /// HTTP method
-    #[arg(short, long, default_value = "GET")]
-    pub method: String,
+    #[arg(short, long)]
+    pub method: Option<String>,
 
     /// Request body or @file.json
     #[arg(short, long)]
@@ -103,10 +104,15 @@ impl Cli {
     /// Load config from file if specified, then override with CLI flags.
     pub fn into_config(&self) -> Config {
         // Start with defaults or load from file
-        let mut cfg = if let Some(ref path) = self.config {
-            load_config_file(path)
-        } else {
-            Config::default()
+        let mut cfg = match self.config {
+            Some(ref path) => match load_config_file(path) {
+                Ok(cfg) => cfg,
+                Err(e) => {
+                    eprintln!("{e}");
+                    std::process::exit(2);
+                }
+            },
+            None => Config::default(),
         };
 
         // CLI flags override file config
@@ -114,12 +120,19 @@ impl Cli {
             cfg.url = url.clone();
         }
 
-        if self.method != "GET" || cfg.method == "GET" {
-            cfg.method = self.method.clone();
+        // Only override what the user actually passed. Assigning these
+        // unconditionally erased the config file's body and output prefix, so
+        // `--config load.toml` silently sent bodyless requests and exported
+        // nothing while reporting a clean run.
+        if let Some(ref method) = self.method {
+            cfg.method = method.clone();
         }
-
-        cfg.body = self.body.clone();
-        cfg.out_prefix = self.out.clone();
+        if let Some(ref body) = self.body {
+            cfg.body = Some(body.clone());
+        }
+        if let Some(ref out) = self.out {
+            cfg.out_prefix = Some(out.clone());
+        }
 
         if let Some(rate) = self.rate {
             cfg.target_rps = rate;
@@ -144,7 +157,8 @@ impl Cli {
         // Parse headers
         for h in &self.header {
             if let Some((key, value)) = h.split_once(':') {
-                cfg.headers.insert(key.trim().to_string(), value.trim().to_string());
+                cfg.headers
+                    .insert(key.trim().to_string(), value.trim().to_string());
             }
         }
 
@@ -152,24 +166,14 @@ impl Cli {
     }
 }
 
-/// Load a Config from a TOML file.
-fn load_config_file(path: &str) -> Config {
-    let p = Path::new(path);
-    if !p.exists() {
-        eprintln!("Warning: config file not found: {}, using defaults", path);
-        return Config::default();
-    }
-    match std::fs::read_to_string(p) {
-        Ok(content) => match toml::from_str::<Config>(&content) {
-            Ok(cfg) => cfg,
-            Err(e) => {
-                eprintln!("Warning: failed to parse config file: {}", e);
-                Config::default()
-            }
-        },
-        Err(e) => {
-            eprintln!("Warning: failed to read config file: {}", e);
-            Config::default()
-        }
-    }
+/// Load a Config from a TOML file the user named explicitly.
+///
+/// A missing or malformed file is an error, not a warning. Falling back to
+/// defaults produces an empty `url`, which silently routes the run into the
+/// interactive TUI instead of reporting the typo.
+fn load_config_file(path: &str) -> anyhow::Result<Config> {
+    let contents = std::fs::read_to_string(path)
+        .map_err(|e| anyhow::anyhow!("failed to read config file '{path}': {e}"))?;
+    toml::from_str::<Config>(&contents)
+        .map_err(|e| anyhow::anyhow!("failed to parse config file '{path}': {e}"))
 }

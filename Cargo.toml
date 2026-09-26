@@ -11,7 +11,7 @@ homepage = "https://github.com/addy-47/RuStress"
 documentation = "https://docs.rs/rustress"
 keywords = ["load-testing", "benchmark", "tui", "performance", "http"]
 categories = ["command-line-utilities", "development-tools::profiling"]
-exclude = ["/.agents", "/.github", "/sandbox", "/temp", "/.qwen", "/public"]
+exclude = ["/.agents", "/.github", "/sandbox", "/temp", "/.qwen", "/public", "/rustress", "/scripts"]
 
 [lib]
 name = "rustress"
@@ -44,14 +44,37 @@ tokio = { version = "1.43", features = ["full"] }
 tokio-util = { version = "0.7", features = ["full"] }
 toml = "0.8"
 tower = "0.5"
-tower-http = { version = "0.6", features = ["trace"] }
+# `tower-http` is intentionally unused: a tracing span per request on the
+# reference target distorts the very numbers it exists to help measure.
+#
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tui-input = { version = "0.11", features = ["crossterm"] }
 uuid = { version = "1.13", features = ["v4", "serde"] }
 
 [dev-dependencies]
+# Used only by the integration suite to build a genuinely chunked
+# `content-length`-free response body. `Stream` must have an unknown size hint
+# for hyper to omit the header, which `stream::unfold` gives and `stream::iter`
+# over a `Vec` does not.
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 tempfile = "3.19"
+
+# Benchmarks use a custom `fn main()` so they can report per-stage
+# decomposition and assert allocation ceilings. `harness = false` on every
+# target; there are no `#[bench]` functions and no nightly requirement.
+[[bench]]
+name = "hot_path_bench"
+harness = false
+# Keeps `cargo test` from building these as test targets. It does NOT cover
+# `cargo test --all-targets`, which includes benches regardless; the benches
+# themselves decline to run under `debug_assertions`.
+test = false
+
+[[bench]]
+name = "aggregation_bench"
+harness = false
+test = false
 
 [profile.release]
 opt-level = 3

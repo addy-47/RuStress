@@ -1,14 +1,12 @@
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Gauge, Paragraph, Sparkline};
-use ratatui::Frame;
 
-use crate::tui::theme::Theme;
-use super::helpers::{
-    render_metric_card, status_badge_text, vertical_chunks, horizontal_chunks,
-};
+use super::helpers::{horizontal_chunks, render_metric_card, status_badge_text, vertical_chunks};
 use crate::core::snapshot::StatsSnapshot;
+use crate::tui::theme::Theme;
 use std::time::{Duration, Instant};
 
 /// Phase labels for the ramp profile.
@@ -173,11 +171,11 @@ impl DashboardView {
         let chunks = vertical_chunks(
             area,
             vec![
-                Constraint::Length(1),  // Status bar
-                Constraint::Length(3),  // Metric cards row 1
-                Constraint::Length(3),  // Metric cards row 2
-                Constraint::Min(6),     // Sparkline charts
-                Constraint::Length(3),  // Progress gauge + status codes
+                Constraint::Length(1), // Status bar
+                Constraint::Length(3), // Metric cards row 1
+                Constraint::Length(3), // Metric cards row 2
+                Constraint::Min(6),    // Sparkline charts
+                Constraint::Length(3), // Progress gauge + status codes
             ],
         );
 
@@ -186,13 +184,22 @@ impl DashboardView {
         let status_line = Line::from(vec![
             Span::styled(badge_text, badge_style),
             Span::raw("  "),
-            Span::styled(phase, Style::default().fg(theme.secondary).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                phase,
+                Style::default()
+                    .fg(theme.secondary)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw("  │  "),
             Span::raw(format!("Elapsed: {}", format_duration(elapsed))),
             Span::raw("  │  "),
             Span::raw(format!("Mode: {}", self.mode.to_uppercase())),
             Span::raw("  │  "),
-            Span::raw(format!("Target: {:.0} {}", self.target_value, if self.mode == "rps" { "RPS" } else { "Users" })),
+            Span::raw(format!(
+                "Target: {:.0} {}",
+                self.target_value,
+                if self.mode == "rps" { "RPS" } else { "Users" }
+            )),
         ]);
         frame.render_widget(
             Paragraph::new(status_line).style(Style::default().bg(theme.surface)),
@@ -219,9 +226,13 @@ impl DashboardView {
             "—".to_string()
         };
         let sr_style = if s.success as f64 / (s.requests.max(1)) as f64 >= 0.95 {
-            Style::default().fg(theme.success).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(theme.success)
+                .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(theme.warning).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(theme.warning)
+                .add_modifier(Modifier::BOLD)
         };
         render_success_card(frame, row1[3], "Success", &success_rate, sr_style, theme);
         render_metric_card(frame, row1[4], "Errors", &s.fail.to_string(), theme);
@@ -249,14 +260,28 @@ impl DashboardView {
             vec![Constraint::Percentage(50), Constraint::Percentage(50)],
         );
         render_latency_sparkline(frame, chart_chunks[0], &self.latency_history, theme);
-        render_rps_sparkline(frame, chart_chunks[1], &self.latency_history, self.target_value as u64, theme);
+        render_rps_sparkline(
+            frame,
+            chart_chunks[1],
+            &self.latency_history,
+            self.target_value as u64,
+            theme,
+        );
 
         // ── Bottom row: progress gauge + status codes ──
         let bottom_chunks = horizontal_chunks(
             chunks[4],
             vec![Constraint::Percentage(40), Constraint::Percentage(60)],
         );
-        render_progress_gauge(frame, bottom_chunks[0], pct, elapsed, &self.duration, phase, theme);
+        render_progress_gauge(
+            frame,
+            bottom_chunks[0],
+            pct,
+            elapsed,
+            &self.duration,
+            phase,
+            theme,
+        );
         render_status_codes(frame, bottom_chunks[1], s, theme);
         render_shed_notice(frame, frame.area(), s, theme);
     }
@@ -294,9 +319,21 @@ fn render_shed_notice(frame: &mut Frame<'_>, area: Rect, s: &StatsSnapshot, them
     frame.render_widget(Paragraph::new(notice).style(style), strip);
 }
 
-fn render_success_card(frame: &mut Frame<'_>, area: Rect, title: &str, value: &str, style: Style, theme: &Theme) {
+fn render_success_card(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    title: &str,
+    value: &str,
+    style: Style,
+    theme: &Theme,
+) {
     let block = Block::default()
-        .title(Span::styled(title, Style::default().fg(theme.secondary).add_modifier(Modifier::BOLD)))
+        .title(Span::styled(
+            title,
+            Style::default()
+                .fg(theme.secondary)
+                .add_modifier(Modifier::BOLD),
+        ))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.border))
         .style(Style::default().bg(theme.surface));
@@ -305,24 +342,40 @@ fn render_success_card(frame: &mut Frame<'_>, area: Rect, title: &str, value: &s
 
 fn render_latency_card(frame: &mut Frame<'_>, area: Rect, title: &str, ms: f64, theme: &Theme) {
     let block = Block::default()
-        .title(Span::styled(title, Style::default().fg(theme.warning).add_modifier(Modifier::BOLD)))
+        .title(Span::styled(
+            title,
+            Style::default()
+                .fg(theme.warning)
+                .add_modifier(Modifier::BOLD),
+        ))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.border))
         .style(Style::default().bg(theme.surface));
     let val = format!("{:.0}ms", ms.round());
     let style = if ms < 100.0 {
-        Style::default().fg(theme.success).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(theme.success)
+            .add_modifier(Modifier::BOLD)
     } else if ms < 500.0 {
-        Style::default().fg(theme.warning).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(theme.warning)
+            .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(theme.error).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(theme.error)
+            .add_modifier(Modifier::BOLD)
     };
     frame.render_widget(Paragraph::new(val).style(style).block(block), area);
 }
 
-fn render_latency_sparkline(frame: &mut Frame<'_>, area: Rect, history: &LatencyHistory, theme: &Theme) {
+fn render_latency_sparkline(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    history: &LatencyHistory,
+    theme: &Theme,
+) {
     let block = Block::default()
-        .title(Span::styled(" Latency (P50/P90/P99 ms) ", theme.title_style()))
+        .title(Span::styled(" Latency (P99 ms) ", theme.title_style()))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.border))
         .style(Style::default().bg(theme.surface));
@@ -341,7 +394,13 @@ fn render_latency_sparkline(frame: &mut Frame<'_>, area: Rect, history: &Latency
     }
 }
 
-fn render_rps_sparkline(frame: &mut Frame<'_>, area: Rect, history: &LatencyHistory, target: u64, theme: &Theme) {
+fn render_rps_sparkline(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    history: &LatencyHistory,
+    target: u64,
+    theme: &Theme,
+) {
     let block = Block::default()
         .title(Span::styled(" Requests/sec ", theme.title_style()))
         .borders(Borders::ALL)
@@ -362,7 +421,15 @@ fn render_rps_sparkline(frame: &mut Frame<'_>, area: Rect, history: &LatencyHist
     }
 }
 
-fn render_progress_gauge(frame: &mut Frame<'_>, area: Rect, pct: f64, elapsed: Duration, total: &Duration, phase: &str, theme: &Theme) {
+fn render_progress_gauge(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    pct: f64,
+    elapsed: Duration,
+    total: &Duration,
+    phase: &str,
+    theme: &Theme,
+) {
     let block = Block::default()
         .title(Span::styled(" Progress ", theme.title_style()))
         .borders(Borders::ALL)
@@ -373,7 +440,13 @@ fn render_progress_gauge(frame: &mut Frame<'_>, area: Rect, pct: f64, elapsed: D
         .block(block)
         .gauge_style(Style::default().fg(theme.progress_bar))
         .percent(pct as u16)
-        .label(format!("{:.0}%  {} / {}  ({})", pct, format_duration(elapsed), format_duration(*total), phase));
+        .label(format!(
+            "{:.0}%  {} / {}  ({})",
+            pct,
+            format_duration(elapsed),
+            format_duration(*total),
+            phase
+        ));
 
     frame.render_widget(gauge, area);
 }
@@ -403,13 +476,19 @@ fn render_status_codes(frame: &mut Frame<'_>, area: Rect, s: &StatsSnapshot, the
         };
         lines.push(Line::from(vec![
             Span::styled(format!("{:>3} ", code), code_style),
-            Span::styled(format!("{:>5} ({:>5.1}%) ", count, pct), Style::default().fg(theme.text)),
+            Span::styled(
+                format!("{:>5} ({:>5.1}%) ", count, pct),
+                Style::default().fg(theme.text),
+            ),
             Span::styled(bar, Style::default().fg(theme.secondary)),
         ]));
     }
 
     if codes.is_empty() {
-        lines.push(Line::from(Span::styled("  (waiting for responses...)", theme.subtle_style())));
+        lines.push(Line::from(Span::styled(
+            "  (waiting for responses...)",
+            theme.subtle_style(),
+        )));
     }
 
     frame.render_widget(Paragraph::new(lines).block(block), area);

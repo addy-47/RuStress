@@ -146,7 +146,11 @@ mod tests {
         }
         let retained = log.to_vec();
         let statuses: Vec<u16> = retained.iter().map(|r| r.status).collect();
-        assert_eq!(statuses, vec![207, 208, 209], "must keep newest, drop oldest");
+        assert_eq!(
+            statuses,
+            vec![207, 208, 209],
+            "must keep newest, drop oldest"
+        );
     }
 
     #[test]
@@ -175,6 +179,48 @@ mod tests {
     fn capacity_is_at_least_one() {
         let log = ResultLog::new(0);
         log.push(result(200));
-        assert_eq!(log.len(), 1, "zero capacity must not panic or drop everything");
+        assert_eq!(
+            log.len(),
+            1,
+            "zero capacity must not panic or drop everything"
+        );
+    }
+
+    #[test]
+    fn zero_capacity_retains_one_and_counts_every_eviction() {
+        let log = ResultLog::new(0);
+        for _ in 0..5 {
+            log.push(result(200));
+        }
+        assert_eq!(log.len(), 1);
+        assert_eq!(log.capacity(), 1);
+        assert_eq!(
+            log.dropped_from_front(),
+            4,
+            "a zero-capacity request must still account for what it discarded, \
+             or the report writer is told a partial view is a complete one"
+        );
+    }
+
+    #[test]
+    fn capacity_beyond_the_initial_allocation_grows_without_dropping() {
+        // The buffer is pre-sized to 1,024 slots regardless of a larger
+        // capacity, so this exercises the growth path against the capacity the
+        // caller actually asked for.
+        let log = ResultLog::new(2_000);
+        for i in 0..2_000 {
+            log.push(result(200 + (i % 100) as u16));
+        }
+        assert_eq!(
+            log.len(),
+            2_000,
+            "a capacity above 1,024 must still be honoured"
+        );
+        assert_eq!(log.dropped_from_front(), 0);
+    }
+
+    #[test]
+    fn a_fresh_log_copies_to_an_empty_vec() {
+        assert!(ResultLog::new(4).to_vec().is_empty());
     }
 }

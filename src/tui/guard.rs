@@ -2,10 +2,10 @@ use std::io::{self, Stdout, Write};
 
 use crossterm::execute;
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
-use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
+use ratatui::backend::CrosstermBackend;
 
 /// RAII guard that restores the host terminal on every exit path.
 ///
@@ -28,18 +28,25 @@ pub struct TerminalGuard {
 impl TerminalGuard {
     /// Take over the terminal: raw mode, alternate screen, mouse capture.
     pub fn enter() -> io::Result<Self> {
-        let mut stdout = io::stdout();
+        let stdout = io::stdout();
         enable_raw_mode()?;
-        execute!(
+
+        // Construct the guard before entering the alternate screen. If the
+        // `execute!` below fails, the `?` returns while `guard` is still in
+        // scope, so its Drop disables raw mode. Returning before the guard
+        // exists would leave the user with a shell that ignores Ctrl-C.
+        let mut guard = Self {
             stdout,
+            active: true,
+        };
+
+        execute!(
+            guard.stdout,
             EnterAlternateScreen,
             crossterm::event::EnableMouseCapture
         )?;
 
-        Ok(Self {
-            stdout,
-            active: true,
-        })
+        Ok(guard)
     }
 
     /// Build a ratatui terminal drawing into the guarded screen.

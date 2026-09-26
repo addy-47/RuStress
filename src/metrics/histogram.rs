@@ -1,6 +1,6 @@
+use crate::core::constants::{HISTOGRAM_HIGH_US, HISTOGRAM_LOW_US, HISTOGRAM_SIGFIGS};
 use hdrhistogram::Histogram;
 use parking_lot::Mutex;
-use crate::core::constants::{HISTOGRAM_HIGH_US, HISTOGRAM_LOW_US, HISTOGRAM_SIGFIGS};
 
 /// Thread-safe HDR histogram wrapper for latency recording.
 ///
@@ -26,9 +26,16 @@ impl LatencyHistogram {
     }
 
     /// Record a latency value in microseconds.
+    ///
+    /// `record` returns `Err` and stores nothing above
+    /// `HISTOGRAM_HIGH_US`, which would drop the very worst latencies from
+    /// every percentile while `requests` and `fail` still counted them —
+    /// reporting a healthy p99 for the requests that went worst.
+    /// `saturating_record` clamps instead, so the sample survives at the
+    /// ceiling and p99/max still see it.
     pub fn record(&self, value_us: u64) {
         let mut hist = self.inner.lock();
-        let _ = hist.record(value_us);
+        hist.saturating_record(value_us);
     }
 
     /// Get value at a given quantile (0.0–100.0).
@@ -75,5 +82,88 @@ impl LatencyHistogram {
 impl Default for LatencyHistogram {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::metrics::percentiles::PercentileExt;
+
+    #[test]
+    fn a_sample_above_the_ceiling_is_kept_at_the_ceiling() {
+        let hist = LatencyHistogram::new();
+        hist.record(HISTOGRAM_HIGH_US * 2);
+
+        assert_eq!(
+            hist.len(),
+            1,
+            "the worst possible sample must be stored; `record` returns Err above \
+             the ceiling and stores nothing, which drops the requests that hurt \
+             most out of every percentile while `requests` still counts them"
+        );
+        assert!(
+            hist.max() >= HISTOGRAM_HIGH_US,
+            "the clamped sample must land at the ceiling, got {}",
+            hist.max()
+        );
+        assert!(
+            hist.p99_ms() >= HISTOGRAM_HIGH_US as f64 / 1000.0 * 0.99,
+            "p99 must reflect the worst sample, got {}",
+            hist.p99_ms()
+        );
+    }
+
+    #[test]
+    fn a_sub_microsecond_sample_is_still_counted() {
+        let hist = LatencyHistogram::new();
+        hist.record(0);
+
+        assert_eq!(
+            hist.len(),
+            1,
+            "a zero-microsecond service time is a real measurement and must be \
+             counted, or `requests` and the histogram disagree about how much \
+             traffic the run produced"
+        );
+        assert_eq!(
+            hist.max(),
+            0,
+            "characterisation, not endorsement: hdrhistogram stores 0 at index 0 \
+             and leaves its max unchanged, so a sub-microsecond request is \
+             counted but reports a zero service time. The value is bounded below \
+             by 1us in practice, so this is display precision, not data loss."
+        );
+    }
+
+    #[test]
+    fn a_sample_exactly_at_the_ceiling_is_kept_without_clamping() {
+        let hist = LatencyHistogram::new();
+        hist.record(HISTOGRAM_HIGH_US);
+
+        assert_eq!(hist.len(), 1);
+        assert!(hist.max() >= HISTOGRAM_HIGH_US);
+        assert!(
+            hist.p99_ms() >= HISTOGRAM_HIGH_US as f64 / 1000.0 * 0.99,
+            "p99 at the exact ceiling must reflect it, got {}",
+            hist.p99_ms()
+        );
+    }
+
+    #[test]
+    fn an_empty_histogram_reports_nothing_recorded() {
+        let hist = LatencyHistogram::new();
+        assert!(hist.is_empty());
+        assert_eq!(hist.len(), 0);
+        assert_eq!(hist.min(), 0);
+    }
+
+    #[test]
+    fn reset_empties_the_histogram() {
+        let hist = LatencyHistogram::new();
+        hist.record(1_000);
+        hist.reset();
+        assert!(hist.is_empty());
+        assert_eq!(hist.p99_ms(), 0.0);
     }
 }

@@ -5,11 +5,9 @@
 
 pub mod config;
 pub mod constants;
-pub mod error;
 pub mod result;
 pub mod snapshot;
 
 pub use config::{Config, Mode};
-pub use error::RustressError;
 pub use result::ExperimentResult;
 pub use snapshot::StatsSnapshot;

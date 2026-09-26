@@ -175,6 +175,12 @@ rustress --url http://localhost:8080/fast \
 
 ---
 
+> ⚠️ **Status: the interactive TUI does not generate load yet.** The form and
+> dashboard render correctly, and `Ctrl+R` switches to the Dashboard, but no
+> engine is started — the dashboard displays zeros rather than live telemetry.
+> **Use headless mode (`--url`, `--rate`, `--users`) to actually run a load
+> test today.** Wiring the engine to the TUI is tracked in `AGENTS.md` §5.
+
 ## 🎮 Interactive TUI Guide
 
 When you run `rustress` without a URL, you enter the **Interactive Configurator**.
@@ -183,15 +189,15 @@ When you run `rustress` without a URL, you enter the **Interactive Configurator*
 This view allows you to tweak your test parameters using a form-based interface.
 - **Navigation**: Use `Tab` or `Arrow Keys` to move between fields.
 - **Selection**: Use `Space` to toggle the Load Mode.
-- **Execution**: Press `Ctrl+R` to start the test and jump to the Dashboard.
+- **Execution**: Press `Ctrl+R` to switch to the Dashboard. *(No engine is started yet — see the warning above.)*
 
 ### Dashboard View
 The live engine view shows real-time performance telemetry.
 - **Top Bar**: Shows current state (RUNNING/DRAINING) and test progress.
 - **Left Panel**: Aggregated stats (Total, Success, Error, In-Flight).
-- **Latency Graph**: Sparklines showing P50, P90, P95, and P99 over the last 100 seconds.
+- **Latency Graph**: Sparkline showing P99 over the last 60 seconds.
 - **Status Codes**: A bar chart or list of current HTTP responses categorized by class.
-- **Real-time Adjust**: Press `+` or `-` to increase or decrease the target load on the fly!
+- **Real-time Adjust**: Press `+` or `-` to adjust the displayed target value. *(Not wired to the scheduler yet.)*
 
 ---
 

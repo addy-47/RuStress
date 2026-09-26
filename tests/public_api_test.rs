@@ -91,7 +91,10 @@ fn config_file_shape_deserializes_from_toml() {
     assert_eq!(cfg.target_rps, 250);
     assert_eq!(cfg.ramp_up_secs, 5);
     assert_eq!(cfg.max_concurrency, 64);
-    assert_eq!(cfg.headers.get("Authorization").map(String::as_str), Some("Bearer token"));
+    assert_eq!(
+        cfg.headers.get("Authorization").map(String::as_str),
+        Some("Bearer token")
+    );
     assert!(cfg.validate().is_ok(), "a well-formed file must validate");
 }
 
@@ -101,7 +104,11 @@ fn default_config_is_valid_enough_to_run() {
         url: "http://127.0.0.1:8080".into(),
         ..Default::default()
     };
-    cfg.validate().expect("default config with a url must validate");
+    cfg.validate()
+        .expect("default config with a url must validate");
 
-    assert!(cfg.total_duration().as_secs() > 0, "a run must have a duration");
+    assert!(
+        cfg.total_duration().as_secs() > 0,
+        "a run must have a duration"
+    );
 }

@@ -2,36 +2,36 @@ use ratatui::style::{Color, Modifier, Style};
 
 /// Stress-themed color palette. Dark terminals get fiery reds/oranges/cyans.
 pub struct Theme {
-    pub primary: Color,       // Main accent (coral red)
-    pub secondary: Color,     // Secondary accent (cyan)
-    pub success: Color,       // Green for success
-    pub warning: Color,       // Orange/amber for warnings
-    pub error: Color,         // Red for errors
+    pub primary: Color,   // Main accent (coral red)
+    pub secondary: Color, // Secondary accent (cyan)
+    pub success: Color,   // Green for success
+    pub warning: Color,   // Orange/amber for warnings
+    pub error: Color,     // Red for errors
     pub text: Color,
     pub subtle: Color,
     pub border: Color,
     pub bg: Color,
-    pub surface: Color,       // Panel background
-    pub highlight: Color,     // Focused field background
+    pub surface: Color,   // Panel background
+    pub highlight: Color, // Focused field background
     pub focused_border: Color,
-    pub progress_bar: Color,  // Progress bar fill
-    pub sparkline: Color,     // Sparkline bar color
+    pub progress_bar: Color, // Progress bar fill
+    pub sparkline: Color,    // Sparkline bar color
 }
 
 impl Theme {
     pub fn dark() -> Self {
         Self {
-            primary: Color::Rgb(196, 248, 245),     // Aqua Foreground (#C4F8F5)
-            secondary: Color::Rgb(44, 82, 77),      // Deep Aqua Accent (#2C524D)
-            success: Color::Rgb(181, 182, 184),     // Muted Green (#B5B6B8)
-            warning: Color::Rgb(150, 186, 220),     // Muted Yellow (#96BADC)
-            error: Color::Rgb(163, 173, 171),       // Muted Red (#A3ADAB)
-            text: Color::Rgb(196, 248, 245),        // Aqua Foreground
-            subtle: Color::Rgb(142, 173, 202),      // Bright Black/Blue (#8EADCA is approx 142,173,202)
-            border: Color::Rgb(79, 137, 139),       // Bright Blue/Cyan (#4F898B)
-            bg: Color::Reset,                       // Transparent background
-            surface: Color::Reset,                  // Transparent surface
-            highlight: Color::Rgb(28, 27, 27),      // Black Background (#1C1B1B)
+            primary: Color::Rgb(196, 248, 245), // Aqua Foreground (#C4F8F5)
+            secondary: Color::Rgb(44, 82, 77),  // Deep Aqua Accent (#2C524D)
+            success: Color::Rgb(181, 182, 184), // Muted Green (#B5B6B8)
+            warning: Color::Rgb(150, 186, 220), // Muted Yellow (#96BADC)
+            error: Color::Rgb(163, 173, 171),   // Muted Red (#A3ADAB)
+            text: Color::Rgb(196, 248, 245),    // Aqua Foreground
+            subtle: Color::Rgb(142, 173, 202),  // Bright Black/Blue (#8EADCA is approx 142,173,202)
+            border: Color::Rgb(79, 137, 139),   // Bright Blue/Cyan (#4F898B)
+            bg: Color::Reset,                   // Transparent background
+            surface: Color::Reset,              // Transparent surface
+            highlight: Color::Rgb(28, 27, 27),  // Black Background (#1C1B1B)
             focused_border: Color::Rgb(196, 248, 245),
             progress_bar: Color::Rgb(44, 82, 77),
             sparkline: Color::Rgb(196, 248, 245),
@@ -80,11 +80,15 @@ impl Theme {
     }
 
     pub fn title_style(&self) -> Style {
-        Style::default().fg(self.primary).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(self.primary)
+            .add_modifier(Modifier::BOLD)
     }
 
     pub fn value_style(&self) -> Style {
-        Style::default().fg(self.secondary).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(self.secondary)
+            .add_modifier(Modifier::BOLD)
     }
 
     pub fn error_style(&self) -> Style {
@@ -100,11 +104,16 @@ impl Theme {
     }
 
     pub fn success_style(&self) -> Style {
-        Style::default().fg(self.success).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(self.success)
+            .add_modifier(Modifier::BOLD)
     }
 
     pub fn tab_active_style(&self) -> Style {
-        Style::default().fg(self.bg).bg(self.primary).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(self.bg)
+            .bg(self.primary)
+            .add_modifier(Modifier::BOLD)
     }
 
     pub fn tab_inactive_style(&self) -> Style {
@@ -112,7 +121,10 @@ impl Theme {
     }
 
     pub fn focused_field_style(&self) -> Style {
-        Style::default().fg(self.bg).bg(self.primary).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(self.bg)
+            .bg(self.primary)
+            .add_modifier(Modifier::BOLD)
     }
 
     pub fn normal_field_style(&self) -> Style {

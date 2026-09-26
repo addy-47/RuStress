@@ -28,7 +28,9 @@ const MAX_SCHEDULE_SLIP: Duration = Duration::from_secs(1);
 /// Owns scheduling only. Request execution lives in [`crate::runner::executor`]
 /// and the reusable request plan in [`PreparedRequest`].
 pub struct LoadEngine {
-    cfg: Config,
+    /// Shared so a request task clones an `Arc`, not the headers and auth
+    /// tokens inside a `Config`.
+    cfg: Arc<Config>,
     client: reqwest::Client,
     prepared: PreparedRequest,
     template_engine: Arc<TemplateEngine>,
@@ -42,6 +44,12 @@ impl LoadEngine {
         cfg: Config,
         updates: tokio::sync::mpsc::UnboundedSender<crate::core::snapshot::StatsSnapshot>,
     ) -> anyhow::Result<Self> {
+        // Validation lives here, not in the CLI, so that a library embedder
+        // cannot bypass it. Without this call every bound in `Config` is inert
+        // and an out-of-range `num_users` reaches `run_users` unbounded.
+        if let Err(errors) = cfg.validate() {
+            anyhow::bail!("invalid configuration:\n  - {}", errors.join("\n  - "));
+        }
         let client = build_client(&cfg)?;
         let permits = Arc::new(tokio::sync::Semaphore::new(cfg.max_concurrency as usize));
 
@@ -51,7 +59,7 @@ impl LoadEngine {
             template_engine: Arc::new(TemplateEngine::new()),
             stats: Arc::new(RunStats::new(updates)),
             permits,
-            cfg,
+            cfg: Arc::new(cfg),
         })
     }
 
@@ -131,7 +139,7 @@ impl LoadEngine {
         start: Instant,
         total_duration: Duration,
     ) -> tokio::task::JoinHandle<()> {
-        let cfg = Arc::new(self.cfg.clone());
+        let cfg = Arc::clone(&self.cfg);
         let client = self.client.clone();
         let engine = Arc::clone(&self.template_engine);
         let stats = Arc::clone(&self.stats);
@@ -194,9 +202,7 @@ impl LoadEngine {
             sleep_until(next_request_time).await;
         }
 
-        eprintln!("DBG spawned={} inflight_at_break={}", self.stats.spawned_count(), self.stats.inflight_count());
         self.await_drain().await;
-        eprintln!("DBG after_drain spawned={} inflight={} recorded={}", self.stats.spawned_count(), self.stats.inflight_count(), self.stats.snapshot().requests);
         self.stats.publish_snapshot();
     }
 
@@ -214,10 +220,9 @@ impl LoadEngine {
             return;
         }
 
-        let skipped = behind.as_nanos() / period.max(Duration::from_nanos(1)).as_nanos();
-        for _ in 0..skipped.min(u64::MAX as u128) as u64 {
-            self.stats.record_scheduled_drop();
-        }
+        let period_ns = period.max(Duration::from_nanos(1)).as_nanos();
+        let skipped = (behind.as_nanos() / period_ns).min(u64::MAX as u128) as u64;
+        self.stats.record_scheduled_drops(skipped);
         *next_request_time = now;
     }
 
@@ -244,22 +249,17 @@ impl LoadEngine {
     }
 
     /// Spawn one open-loop request holding an owned concurrency permit.
-    fn spawn_scheduled(
-        &self,
-        scheduled: Instant,
-        permit: tokio::sync::OwnedSemaphorePermit,
-    ) {
+    fn spawn_scheduled(&self, scheduled: Instant, permit: tokio::sync::OwnedSemaphorePermit) {
         let client = self.client.clone();
         let engine = Arc::clone(&self.template_engine);
         let stats = Arc::clone(&self.stats);
         let prepared = self.prepared.clone();
-        let cfg = self.cfg.clone();
+        let cfg = Arc::clone(&self.cfg);
         let ctx = TemplateContext::new(Uuid::new_v4().to_string());
 
         // Admitted here, at dispatch, strictly BEFORE spawning. Admitting
         // inside the task body would make a spawned-but-not-yet-polled task
         // invisible to the drain barrier, and the run would abandon it.
-        stats.inc_spawned();
         let admitted = InflightGuard::admit(&stats);
 
         tokio::spawn(async move {

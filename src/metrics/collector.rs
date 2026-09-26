@@ -23,7 +23,6 @@ pub struct StatsCollector {
 
     // Histograms — mutex-protected.
     service_time: LatencyHistogram,
-    total_time: LatencyHistogram,
 
     // Maps — mutex-protected.
     status_codes: Mutex<IndexMap<u16, u64>>,
@@ -41,7 +40,6 @@ impl StatsCollector {
             bytes: AtomicU64::new(0),
             total_queue_wait_micros: AtomicU64::new(0),
             service_time: LatencyHistogram::new(),
-            total_time: LatencyHistogram::new(),
             status_codes: Mutex::new(IndexMap::new()),
             error_counts: Mutex::new(IndexMap::new()),
             response_samples: Mutex::new(IndexMap::new()),
@@ -73,33 +71,35 @@ impl StatsCollector {
         // Histograms — single lock each.
         self.service_time
             .record(result.service_time.as_micros() as u64);
-        self.total_time.record(result.latency.as_micros() as u64);
 
-        // Maps — single lock for all.
+        // Maps.
+        //
+        // Status and error are recorded independently, not either/or. A
+        // transport failure has no status (0) but does have an error; a
+        // response that failed mid-body has BOTH a real observed status and an
+        // error. Branching on one suppressed the other.
+        if status_code != 0 {
+            let mut codes = self.status_codes.lock();
+            *codes.entry(status_code).or_insert(0) += 1;
+
+            if status_code >= 400 {
+                if let Some(body) = response_body {
+                    let mut samples = self.response_samples.lock();
+                    samples
+                        .entry(status_code)
+                        .or_insert_with(|| sample_of(body));
+                }
+            }
+        }
+
         if let Some(err) = error {
             let mut errors = self.error_counts.lock();
             let key = bounded_error_key(&errors, err);
             *errors.entry(key).or_insert(0) += 1;
 
-            // Store a sample response body for this error.
             if let Some(body) = response_body {
                 let mut samples = self.response_samples.lock();
-                samples
-                    .entry(0)
-                    .or_insert_with(|| body.chars().take(200).collect());
-            }
-        } else {
-            let mut codes = self.status_codes.lock();
-            *codes.entry(status_code).or_insert(0) += 1;
-
-            // Also capture response body samples for HTTP >= 400.
-            if status_code >= 400 {
-                if let Some(body) = response_body {
-                    let mut samples = self.response_samples.lock();
-                    if !samples.contains_key(&status_code) {
-                        samples.insert(status_code, body.chars().take(200).collect());
-                    }
-                }
+                samples.entry(0).or_insert_with(|| sample_of(body));
             }
         }
     }
@@ -166,7 +166,6 @@ impl StatsCollector {
         self.total_queue_wait_micros.store(0, Ordering::Relaxed);
 
         self.service_time.reset();
-        self.total_time.reset();
 
         self.status_codes.lock().clear();
         self.error_counts.lock().clear();
@@ -179,6 +178,14 @@ impl Default for StatsCollector {
         Self::new()
     }
 }
+
+/// Truncate a captured body to a diagnostic-sized sample.
+fn sample_of(body: &str) -> String {
+    body.chars().take(MAX_SAMPLE_CHARS).collect()
+}
+
+/// Maximum characters retained from a response body for diagnostics.
+const MAX_SAMPLE_CHARS: usize = 200;
 
 /// Map an error message onto a bounded key space.
 ///
@@ -197,11 +204,11 @@ fn bounded_error_key(errors: &IndexMap<String, u64>, err: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::constants::RESULT_RING_CAPACITY;
+    use crate::core::constants::{MAX_CAPTURED_BODY_BYTES, RESULT_RING_CAPACITY};
     use chrono::Utc;
     use std::sync::Arc;
-    use std::time::Duration;
     use std::thread;
+    use std::time::Duration;
 
     /// Build a result for collector assertions.
     fn result(status: u16, success: bool) -> ExperimentResult {
@@ -218,6 +225,13 @@ mod tests {
             error: None,
             response_body: None,
         }
+    }
+
+    /// Build a transport-failure result carrying `message`.
+    fn error_result(message: &str) -> ExperimentResult {
+        let mut r = result(0, false);
+        r.error = Some(message.to_string());
+        r
     }
 
     #[test]
@@ -257,10 +271,11 @@ mod tests {
     }
 
     #[test]
-    fn error_results_do_not_pollute_status_code_map() {
+    fn transport_errors_do_not_pollute_status_code_map() {
         let collector = StatsCollector::new();
-        let mut r = result(500, false);
-        r.error = Some("boom".into());
+        // A transport failure never reached the wire, so it has no status.
+        let mut r = result(0, false);
+        r.error = Some("connection refused".into());
 
         collector.add(&r);
 
@@ -268,6 +283,22 @@ mod tests {
             collector.snapshot().status_codes.is_empty(),
             "a transport error has no status code and must not be recorded as one"
         );
+    }
+
+    #[test]
+    fn a_mid_body_error_keeps_its_observed_status() {
+        let collector = StatsCollector::new();
+        // 200 headers, then the body stream failed: the status is real and
+        // observed, so it belongs in the distribution.
+        let mut r = result(200, false);
+        r.error = Some("body stream closed".into());
+
+        collector.add(&r);
+
+        let snap = collector.snapshot();
+        assert_eq!(snap.status_codes.get(&200), Some(&1));
+        assert_eq!(snap.error_counts.get("body stream closed"), Some(&1));
+        assert_eq!(snap.fail, 1);
     }
 
     #[test]
@@ -411,6 +442,105 @@ mod tests {
         assert_ne!(
             RESULT_RING_CAPACITY, 0,
             "a zero-capacity ring would discard every result"
+        );
+    }
+
+    #[test]
+    fn exactly_the_key_budget_opens_no_overflow_bucket() {
+        let collector = StatsCollector::new();
+        for i in 0..MAX_TRACKED_ERROR_KEYS {
+            collector.add(&error_result(&format!("err-{i}")));
+        }
+
+        let errors = collector.snapshot().error_counts;
+        assert_eq!(
+            errors.len(),
+            MAX_TRACKED_ERROR_KEYS,
+            "the budget is a ceiling, not a target: filling it exactly must not \
+             spill into the overflow bucket"
+        );
+        assert!(
+            !errors.contains_key(ERROR_KEY_OVERFLOW_LABEL),
+            "an overflow bucket that exists while unused is a key an operator \
+             could mistake for a real error class: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn one_error_past_the_key_budget_lands_in_the_overflow_bucket() {
+        let collector = StatsCollector::new();
+        for i in 0..=MAX_TRACKED_ERROR_KEYS {
+            collector.add(&error_result(&format!("err-{i}")));
+        }
+
+        let errors = collector.snapshot().error_counts;
+        assert_eq!(errors.len(), MAX_TRACKED_ERROR_KEYS + 1);
+        assert_eq!(
+            errors.get(ERROR_KEY_OVERFLOW_LABEL),
+            Some(&1),
+            "exactly one error is past the budget, so the bucket must hold exactly one"
+        );
+        assert_eq!(
+            errors.get("err-0"),
+            Some(&1),
+            "the in-budget key is unaffected"
+        );
+    }
+
+    #[test]
+    fn the_overflow_bucket_accumulates_rather_than_replacing() {
+        let collector = StatsCollector::new();
+        for i in 0..MAX_TRACKED_ERROR_KEYS {
+            collector.add(&error_result(&format!("err-{i}")));
+        }
+        assert!(
+            !collector
+                .snapshot()
+                .error_counts
+                .contains_key(ERROR_KEY_OVERFLOW_LABEL),
+            "the bucket must start empty once the budget is exactly full"
+        );
+
+        for i in 0..100 {
+            collector.add(&error_result(&format!("later-{i}")));
+        }
+
+        assert_eq!(
+            collector
+                .snapshot()
+                .error_counts
+                .get(ERROR_KEY_OVERFLOW_LABEL),
+            Some(&100),
+            "each folded error must add to the same bucket, not reset it"
+        );
+    }
+
+    #[test]
+    fn a_captured_body_does_not_change_the_error_key() {
+        let collector = StatsCollector::new();
+        let mut with_body = error_result("connection refused");
+        with_body.response_body = Some("x".repeat(MAX_CAPTURED_BODY_BYTES));
+
+        collector.add(&error_result("connection refused"));
+        collector.add(&with_body);
+
+        let errors = collector.snapshot().error_counts;
+        assert_eq!(errors.len(), 1, "the same error must not become two keys");
+        assert_eq!(errors.get("connection refused"), Some(&2));
+    }
+
+    #[test]
+    fn bytes_counter_clamps_a_negative_result() {
+        let collector = StatsCollector::new();
+        let mut r = result(200, true);
+        r.bytes = -5_000;
+        collector.add(&r);
+
+        assert_eq!(
+            collector.total_bytes(),
+            0,
+            "a negative byte count must not be added, or the throughput figure \
+             under-reports in a way nobody can explain"
         );
     }
 }

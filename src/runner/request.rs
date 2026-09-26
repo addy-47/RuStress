@@ -22,6 +22,7 @@ pub struct PreparedRequest {
     static_url: String,
     url_template: Option<String>,
     static_body: Option<String>,
+    body_template: Option<String>,
     static_headers: Vec<(reqwest::header::HeaderName, String)>,
     templated_headers: Vec<(reqwest::header::HeaderName, String)>,
     inject_content_type: bool,
@@ -38,26 +39,21 @@ impl PreparedRequest {
     /// instead of silently producing empty bodies mid-run.
     pub fn new(cfg: &Config, engine: &TemplateEngine) -> anyhow::Result<Self> {
         let method = reqwest::Method::from_bytes(cfg.method.as_bytes())
-            .unwrap_or(reqwest::Method::GET);
+            .map_err(|_| anyhow::anyhow!("invalid HTTP method '{}'", cfg.method))?;
 
         let url_template = has_template(&cfg.url).then(|| cfg.url.clone());
 
-        let static_body = match cfg.body.as_deref() {
-            None | Some("") => None,
+        let (static_body, body_template) = match cfg.body.as_deref() {
+            None | Some("") => (None, None),
             Some(body) if body.starts_with('@') => {
                 let path = body.strip_prefix('@').unwrap_or(body);
                 let contents = engine
                     .file_cache()
                     .get_raw(path)
                     .map_err(|e| anyhow::anyhow!("failed to load body file '{path}': {e}"))?;
-                Some(contents)
+                split_template(&contents)
             }
-            Some(body) if has_template(body) => {
-                return Err(anyhow::anyhow!(
-                    "templated inline bodies are not supported; use @file with a template inside it"
-                ));
-            }
-            Some(body) => Some(body.to_string()),
+            Some(body) => split_template(body),
         };
 
         let mut has_content_type = false;
@@ -65,10 +61,10 @@ impl PreparedRequest {
         let mut templated_headers = Vec::new();
 
         for (name, value) in &cfg.headers {
-            let header_name = match HeaderName::from_bytes(name.as_bytes()) {
-                Ok(parsed) => parsed,
-                Err(_) => continue,
-            };
+            // Silently dropping a malformed header means an auth header never
+            // reaches the target and every request 401s with no explanation.
+            let header_name = HeaderName::from_bytes(name.as_bytes())
+                .map_err(|_| anyhow::anyhow!("invalid header name '{name}'"))?;
             if header_name == reqwest::header::CONTENT_TYPE {
                 has_content_type = true;
             }
@@ -79,12 +75,13 @@ impl PreparedRequest {
             }
         }
 
-        let carries_body = static_body.is_some();
+        let carries_body = static_body.is_some() || body_template.is_some();
 
         Ok(Self {
             method,
             static_url: cfg.url.clone(),
             url_template,
+            body_template,
             static_body,
             static_headers,
             templated_headers,
@@ -95,7 +92,9 @@ impl PreparedRequest {
 
     /// Whether any part of this request requires per-request rendering.
     pub fn is_templated(&self) -> bool {
-        self.url_template.is_some() || !self.templated_headers.is_empty()
+        self.url_template.is_some()
+            || self.body_template.is_some()
+            || !self.templated_headers.is_empty()
     }
 
     /// Render the templated parts and produce a `reqwest` request builder.
@@ -128,6 +127,8 @@ impl PreparedRequest {
 
         if let Some(body) = &self.static_body {
             request = request.body(body.clone());
+        } else if let Some(template) = &self.body_template {
+            request = request.body(render(engine, template, ctx)?);
         }
 
         if self.inject_content_type {
@@ -143,8 +144,25 @@ fn has_template(value: &str) -> bool {
     value.contains("{{")
 }
 
+/// Split body text into a static part and a templated part.
+///
+/// A body whose contents include directives must be rendered per request.
+/// Sending it verbatim puts `{{ uuid() }}` on the wire for the whole run and
+/// presents that as a working feature.
+fn split_template(body: &str) -> (Option<String>, Option<String>) {
+    if has_template(body) {
+        (None, Some(body.to_string()))
+    } else {
+        (Some(body.to_string()), None)
+    }
+}
+
 /// Render a template, mapping failures onto an error string.
-fn render(engine: &TemplateEngine, template: &str, ctx: &TemplateContext) -> Result<String, String> {
+fn render(
+    engine: &TemplateEngine,
+    template: &str,
+    ctx: &TemplateContext,
+) -> Result<String, String> {
     engine
         .execute_str(template, ctx)
         .map_err(|e| format!("template render failed: {e}"))
@@ -220,11 +238,23 @@ mod tests {
         let cfg = cfg_with(IndexMap::new(), Some(&path));
         let p = prepared(&cfg);
 
-        assert_eq!(
-            p.static_body.as_deref(),
-            Some("{\"id\":\"{{ uuid() }}\"}"),
-            "file contents must be captured verbatim, template syntax intact"
+        assert!(
+            p.body_template.is_some(),
+            "a body containing directives must be rendered per request, not sent verbatim"
         );
+        assert!(p.is_templated());
+    }
+
+    #[test]
+    fn static_at_prefixed_body_is_sent_verbatim() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        write!(file, "{{\"id\":7}}").unwrap();
+
+        let path = format!("@{}", file.path().display());
+        let p = prepared(&cfg_with(IndexMap::new(), Some(&path)));
+
+        assert_eq!(p.static_body.as_deref(), Some("{\"id\":7}"));
+        assert!(p.body_template.is_none());
     }
 
     #[test]
@@ -251,24 +281,27 @@ mod tests {
     }
 
     #[test]
-    fn templated_inline_body_is_rejected() {
-        let cfg = cfg_with(IndexMap::new(), Some("{\"id\":\"{{ uuid() }}\"}"));
-        let err = PreparedRequest::new(&cfg, &engine()).unwrap_err();
-        assert!(err.to_string().contains("templated inline bodies"));
+    fn templated_inline_body_is_rendered_not_rejected() {
+        let cfg = cfg_with(IndexMap::new(), Some("{\"id\":\"{{ user_id }}\"}"));
+        let p = prepared(&cfg);
+        assert!(p.body_template.is_some());
+        assert!(p.static_body.is_none());
     }
 
     #[test]
-    fn invalid_header_name_is_skipped_not_fatal() {
+    fn invalid_header_name_is_rejected() {
         let mut headers = IndexMap::new();
         headers.insert("bad header name".to_string(), "v".to_string());
-        assert!(prepared(&cfg_with(headers, None)).static_headers.is_empty());
+        let err = PreparedRequest::new(&cfg_with(headers, None), &engine()).unwrap_err();
+        assert!(err.to_string().contains("invalid header name"), "{err}");
     }
 
     #[test]
-    fn invalid_method_falls_back_to_get() {
+    fn invalid_method_is_rejected_rather_than_becoming_get() {
         let mut cfg = cfg_with(IndexMap::new(), None);
         cfg.method = "not a method".to_string();
-        assert_eq!(prepared(&cfg).method, reqwest::Method::GET);
+        let err = PreparedRequest::new(&cfg, &engine()).unwrap_err();
+        assert!(err.to_string().contains("invalid HTTP method"), "{err}");
     }
 
     #[test]
@@ -293,5 +326,94 @@ mod tests {
 
         let request = p.build(&client, &engine(), &ctx).unwrap().build().unwrap();
         assert_eq!(request.url().as_str(), "http://127.0.0.1:9/u/alice");
+    }
+
+    #[test]
+    fn an_empty_inline_body_sends_no_body() {
+        let p = prepared(&cfg_with(IndexMap::new(), Some("")));
+        assert!(
+            p.static_body.is_none() && p.body_template.is_none(),
+            "an empty body string describes no body, so none must be attached"
+        );
+        assert!(
+            !p.inject_content_type,
+            "a request with no body must not declare a content type for one"
+        );
+    }
+
+    #[test]
+    fn a_mixed_case_content_type_header_suppresses_injection() {
+        let mut headers = IndexMap::new();
+        headers.insert("Content-Type".to_string(), "text/plain".to_string());
+        let p = prepared(&cfg_with(headers, Some("hello")));
+        assert!(
+            !p.inject_content_type,
+            "header names are case-insensitive; a user writing `Content-Type` must \
+             not end up sending it twice with conflicting values"
+        );
+    }
+
+    #[test]
+    fn static_and_templated_headers_are_separated() {
+        let mut headers = IndexMap::new();
+        headers.insert("X-Static".to_string(), "fixed".to_string());
+        headers.insert("X-Templated".to_string(), "{{ user_id }}".to_string());
+        headers.insert("X-AlsoTemplated".to_string(), "{{ uuid() }}".to_string());
+
+        let p = prepared(&cfg_with(headers, None));
+        assert_eq!(
+            p.static_headers.len(),
+            1,
+            "a header with no directive must be reused verbatim, not re-rendered"
+        );
+        assert_eq!(p.templated_headers.len(), 2);
+        assert!(p.is_templated());
+    }
+
+    #[test]
+    fn a_templated_body_with_an_explicit_content_type_does_not_inject() {
+        let mut headers = IndexMap::new();
+        headers.insert("content-type".to_string(), "application/xml".to_string());
+        let p = prepared(&cfg_with(headers, Some("<a>{{ user_id }}</a>")));
+        assert!(p.body_template.is_some());
+        assert!(!p.inject_content_type);
+    }
+
+    #[test]
+    fn a_templated_header_that_renders_to_nothing_still_produces_a_request() {
+        let mut headers = IndexMap::new();
+        headers.insert("X-Id".to_string(), "{{ user_id }}".to_string());
+        let p = prepared(&cfg_with(headers, None));
+        let client = reqwest::Client::new();
+        let request = p
+            .build(&client, &engine(), &TemplateContext::new(String::new()))
+            .expect("an empty render is a valid header value, not a build failure")
+            .build()
+            .expect("the request must assemble");
+        assert_eq!(
+            request.headers().get("x-id").map(|v| v.as_bytes()),
+            Some(b"".as_slice())
+        );
+    }
+
+    /// Characterisation, not endorsement.
+    ///
+    /// An inline empty body is treated as "no body", while an empty `@file`
+    /// body is treated as "a body that happens to be empty" and pulls in a
+    /// `content-type`. The two paths disagree; this test records the current
+    /// behaviour so the disagreement is visible rather than latent.
+    #[test]
+    fn an_empty_body_file_is_still_treated_as_carrying_a_body() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        write!(file, "").unwrap();
+
+        let arg = format!("@{}", file.path().display());
+        let p = prepared(&cfg_with(IndexMap::new(), Some(&arg)));
+        assert_eq!(p.static_body.as_deref(), Some(""));
+        assert!(
+            p.inject_content_type,
+            "CHARACTERISATION: this disagrees with the inline empty-body path \
+             above. Reported as an open finding, not approved behaviour."
+        );
     }
 }

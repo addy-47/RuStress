@@ -3,7 +3,9 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 use crate::core::constants::{
-    MAX_ALLOWED_CONCURRENCY, MAX_ALLOWED_RPS, MAX_ALLOWED_USERS, MIN_ALLOWED_CONCURRENCY,
+    DEFAULT_DURATION_SECS, DEFAULT_MAX_CONCURRENCY, DEFAULT_METHOD, DEFAULT_NUM_USERS,
+    DEFAULT_TARGET_RPS, DEFAULT_TIMEOUT_SECS, MAX_ALLOWED_CONCURRENCY, MAX_ALLOWED_RPS,
+    MAX_ALLOWED_USERS, MIN_ALLOWED_CONCURRENCY,
 };
 
 /// Load generation mode.
@@ -180,27 +182,27 @@ fn has_http_scheme(url: &str) -> bool {
 }
 
 fn default_method() -> String {
-    "GET".to_string()
+    DEFAULT_METHOD.to_string()
 }
 
 fn default_target_rps() -> u32 {
-    100
+    DEFAULT_TARGET_RPS
 }
 
 fn default_duration() -> u64 {
-    30
+    DEFAULT_DURATION_SECS
 }
 
 fn default_timeout() -> u64 {
-    30
+    DEFAULT_TIMEOUT_SECS
 }
 
 fn default_num_users() -> u32 {
-    10
+    DEFAULT_NUM_USERS
 }
 
 fn default_max_concurrency() -> u32 {
-    crate::core::constants::DEFAULT_MAX_CONCURRENCY
+    DEFAULT_MAX_CONCURRENCY
 }
 
 #[cfg(test)]
@@ -265,5 +267,148 @@ mod tests {
             ..Default::default()
         };
         assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn a_script_run_needs_no_url() {
+        let cfg = Config {
+            url: String::new(),
+            command: Some("echo hello".into()),
+            steady_dur_secs: 1,
+            ..Default::default()
+        };
+        assert!(
+            cfg.validate().is_ok(),
+            "script mode has no target url to validate: {:?}",
+            cfg.validate()
+        );
+    }
+
+    #[test]
+    fn a_script_run_still_validates_every_other_bound() {
+        let cfg = Config {
+            url: String::new(),
+            command: Some("echo hello".into()),
+            steady_dur_secs: 1,
+            max_concurrency: 0,
+            ..Default::default()
+        };
+        let errors = cfg
+            .validate()
+            .expect_err("a zero-permit semaphore must be rejected");
+        assert_eq!(
+            errors.len(),
+            1,
+            "expected exactly one violation: {errors:?}"
+        );
+        assert!(errors[0].contains("max_concurrency"), "{errors:?}");
+    }
+
+    #[test]
+    fn the_scheme_check_is_case_insensitive() {
+        let cfg = Config {
+            url: "HTTP://localhost:8080/x".into(),
+            steady_dur_secs: 1,
+            ..Default::default()
+        };
+        assert!(
+            cfg.validate().is_ok(),
+            "a scheme is case-insensitive per RFC 3986: {:?}",
+            cfg.validate()
+        );
+    }
+
+    #[test]
+    fn a_non_http_scheme_is_rejected() {
+        for url in ["ftp://host/x", "file:///etc/passwd", "//host/x"] {
+            let cfg = Config {
+                url: url.into(),
+                steady_dur_secs: 1,
+                ..Default::default()
+            };
+            assert!(
+                cfg.validate().is_err(),
+                "{url} is not an absolute HTTP url and must be rejected at construction"
+            );
+        }
+    }
+
+    #[test]
+    fn every_documented_maximum_is_itself_accepted() {
+        let cfg = Config {
+            url: "http://localhost:8080".into(),
+            target_rps: MAX_ALLOWED_RPS,
+            num_users: MAX_ALLOWED_USERS,
+            max_concurrency: MAX_ALLOWED_CONCURRENCY,
+            steady_dur_secs: 1,
+            timeout_secs: 1,
+            ..Default::default()
+        };
+        assert!(
+            cfg.validate().is_ok(),
+            "a bound that rejects its own maximum is off by one: {:?}",
+            cfg.validate()
+        );
+    }
+
+    #[test]
+    fn one_past_each_documented_maximum_is_rejected() {
+        let cases: [(&str, Config); 3] = [
+            (
+                "target_rps",
+                Config {
+                    url: "http://localhost:8080".into(),
+                    target_rps: MAX_ALLOWED_RPS + 1,
+                    steady_dur_secs: 1,
+                    ..Default::default()
+                },
+            ),
+            (
+                "num_users",
+                Config {
+                    url: "http://localhost:8080".into(),
+                    num_users: MAX_ALLOWED_USERS + 1,
+                    steady_dur_secs: 1,
+                    ..Default::default()
+                },
+            ),
+            (
+                "max_concurrency",
+                Config {
+                    url: "http://localhost:8080".into(),
+                    max_concurrency: MAX_ALLOWED_CONCURRENCY + 1,
+                    steady_dur_secs: 1,
+                    ..Default::default()
+                },
+            ),
+        ];
+
+        for (field, cfg) in cases {
+            let errors = cfg
+                .validate()
+                .err()
+                .unwrap_or_else(|| panic!("{field} one past its maximum must be rejected"));
+            assert!(
+                errors.iter().any(|e| e.contains(field)),
+                "the rejection must name {field}: {errors:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_minimum_concurrency_is_accepted_and_one_below_it_is_not() {
+        let at_min = Config {
+            url: "http://localhost:8080".into(),
+            max_concurrency: MIN_ALLOWED_CONCURRENCY,
+            steady_dur_secs: 1,
+            ..Default::default()
+        };
+        assert!(at_min.validate().is_ok());
+
+        let below = Config {
+            max_concurrency: MIN_ALLOWED_CONCURRENCY - 1,
+            ..at_min
+        };
+        assert!(below.validate().is_err());
     }
 }

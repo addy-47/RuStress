@@ -1,8 +1,8 @@
-use indicatif::{ProgressBar, ProgressStyle};
 use crate::core::config::Config;
 use crate::core::constants::PROGRESS_UPDATE_INTERVAL_MS;
 use crate::core::snapshot::StatsSnapshot;
 use crate::runner::LoadEngine;
+use indicatif::{ProgressBar, ProgressStyle};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc;
@@ -49,7 +49,7 @@ pub async fn run_headless(cfg: Config) -> anyhow::Result<()> {
     pb.set_style(
         ProgressStyle::default_bar()
             .template("{spinner:.green} [{bar:40.cyan/blue}] {pos:>3}% {msg}")
-            .unwrap()
+            .expect("progress template is a literal and cannot fail to parse")
             .progress_chars("█▉▊▋▌▍▎▏  "),
     );
 
@@ -65,50 +65,52 @@ pub async fn run_headless(cfg: Config) -> anyhow::Result<()> {
             (elapsed.as_secs_f64() / total_dur.as_secs_f64() * 100.0).min(100.0)
         };
 
-        // Try to receive stats
-        match stats_rx.try_recv() {
-            Ok(snap) => {
-                last_snap = snap;
-                let avg_rps = if elapsed.as_secs_f64() > 0.0 {
-                    last_snap.requests as f64 / elapsed.as_secs_f64()
-                } else {
-                    0.0
-                };
-                pb.set_position(pct as u64);
-                pb.set_message(format!(
-                    "  Req: {} | RPS: {:.0} | P99: {:.0}ms | Err: {}",
-                    last_snap.requests,
-                    avg_rps,
-                    last_snap.p99_service_ms,
-                    last_snap.fail,
-                ));
-            }
-            Err(_) => {
-                pb.set_position(pct as u64);
-            }
+        // Drain every pending snapshot and keep only the newest. Taking a
+        // single frame per tick lets the channel grow without bound whenever
+        // the engine ticks faster than this loop wakes up, and reporting a
+        // frame that is already stale understates the run.
+        while let Ok(newer) = stats_rx.try_recv() {
+            last_snap = newer;
         }
+
+        let avg_rps = if elapsed.as_secs_f64() > 0.0 {
+            last_snap.requests as f64 / elapsed.as_secs_f64()
+        } else {
+            0.0
+        };
+        pb.set_position(pct as u64);
+        pb.set_message(format!(
+            "  Req: {} | RPS: {:.0} | P99: {:.0}ms | Err: {}",
+            last_snap.requests, avg_rps, last_snap.p99_service_ms, last_snap.fail,
+        ));
 
         if elapsed >= total_dur {
             break;
         }
 
-        tokio::time::sleep(std::time::Duration::from_millis(PROGRESS_UPDATE_INTERVAL_MS)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(
+            PROGRESS_UPDATE_INTERVAL_MS,
+        ))
+        .await;
     }
 
-    // Wait for engine to drain
+    // Wait for engine to drain, then read counters directly. The final
+    // snapshot is produced during drain, after the monitor loop has stopped
+    // reading, so a channel frame cannot be trusted to carry the run's totals.
     cancel.cancel();
     let _ = engine_handle.await;
 
     pb.finish_with_message("Complete");
     println!();
 
-    // Print summary
-    let results = stats.get_results();
-    print_summary(&last_snap);
+    // Print summary from the authoritative counters.
+    let final_snap = stats.snapshot();
+    print_summary(&final_snap);
 
-    // Auto-export if --out specified
+    // Only materialise the retention ring when an export actually needs it.
     if let Some(ref prefix) = cfg.out_prefix {
-        export_reports(&results, prefix)?;
+        let results = stats.get_results();
+        export_reports(&results, &final_snap, prefix)?;
     }
 
     Ok(())
@@ -127,7 +129,10 @@ fn print_summary(snap: &StatsSnapshot) {
     println!("  Success:        {}", success);
     println!("  Failed:         {}", fail);
     if total > 0 {
-        println!("  Success Rate:   {:.1}%", success as f64 / total as f64 * 100.0);
+        println!(
+            "  Success Rate:   {:.1}%",
+            success as f64 / total as f64 * 100.0
+        );
     }
     println!("  P50 Latency:    {:.1}ms", snap.p50_service_ms);
     println!("  P90 Latency:    {:.1}ms", snap.p90_service_ms);
@@ -143,14 +148,20 @@ fn print_summary(snap: &StatsSnapshot) {
         let scheduled = total + snap.dropped_scheduled;
         println!();
         println!("  ⚠ MEASUREMENT INVALID");
-        println!("    {} of {} scheduled requests were shed because the", snap.dropped_scheduled, scheduled);
+        println!(
+            "    {} of {} scheduled requests were shed because the",
+            snap.dropped_scheduled, scheduled
+        );
         println!("    concurrency ceiling was saturated. The generator was the");
         println!("    bottleneck, not the target. Raise --max-concurrency or");
         println!("    lower --rate, then re-run.");
     }
     if snap.dropped_results > 0 {
         println!();
-        println!("  Results:        {} evicted from the retention ring", snap.dropped_results);
+        println!(
+            "  Results:        {} evicted from the retention ring",
+            snap.dropped_results
+        );
         println!("    (report contains only the most recent samples)");
     }
 
@@ -173,7 +184,11 @@ fn print_summary(snap: &StatsSnapshot) {
     println!("{}", "═".repeat(60));
 }
 
-fn export_reports(results: &[crate::core::result::ExperimentResult], prefix: &str) -> anyhow::Result<()> {
+fn export_reports(
+    results: &[crate::core::result::ExperimentResult],
+    snap: &StatsSnapshot,
+    prefix: &str,
+) -> anyhow::Result<()> {
     let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S");
     let base = format!("{}_{}", prefix, ts);
 
@@ -189,7 +204,7 @@ fn export_reports(results: &[crate::core::result::ExperimentResult], prefix: &st
 
     // Summary
     let summary_path = format!("{}_summary.json", base);
-    crate::export::export_summary(results, &summary_path)?;
+    crate::export::export_summary(results.len(), snap, &summary_path)?;
     println!("  Exported: {}", summary_path);
 
     Ok(())

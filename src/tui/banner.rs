@@ -17,9 +17,7 @@ pub fn banner() -> String {
 /// Compact inline banner for CLI help (shorter width).
 pub fn short_banner() -> String {
     let version = crate::core::constants::VERSION;
-    format!(
-        "\x1b[1;36m  RUSTRESS\x1b[0m \x1b[38;5;147mv{version}\x1b[0m\n"
-    )
+    format!("\x1b[1;36m  RUSTRESS\x1b[0m \x1b[38;5;147mv{version}\x1b[0m\n")
 }
 
 #[cfg(test)]

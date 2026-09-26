@@ -11,6 +11,16 @@ use crate::core::constants::{DEFAULT_TIMEOUT_SECS, MAX_IDLE_CONNS};
 /// a pool smaller than the ceiling would serialise requests and report a
 /// generator bottleneck as target latency, while a pool with no idle timeout
 /// retains sockets for the life of the process.
+///
+/// # TLS
+///
+/// Certificate verification is **disabled unconditionally**. That is the right
+/// default for a load generator pointed at staging targets with self-signed or
+/// expired certificates, and it is why the tool can measure a service whose
+/// TLS a real client would reject. The consequence to be aware of: the tool
+/// cannot measure TLS handshake rejection, and a target with an expired
+/// certificate reports 200s here. Expose this as a flag rather than leaving it
+/// implicit when adding a TLS-sensitive measurement mode.
 pub fn build_client(cfg: &Config) -> anyhow::Result<Client> {
     let timeout = if cfg.timeout_secs > 0 {
         Duration::from_secs(cfg.timeout_secs)

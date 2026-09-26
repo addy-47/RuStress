@@ -15,7 +15,7 @@ pub type ParsedTemplate = Arc<String>;
 /// Supports the following custom functions:
 /// - `{{ random_int(min, max) }}` — random integer in range [min, max)
 /// - `{{ uuid() }}` — generates a new UUID v4
-/// - `{{ user_id() }}` — returns the current user ID from context
+/// - `{{ user_id }}` — the current user ID, provided as a context variable
 /// - `{{ request_uuid() }}` — returns the current request UUID
 /// - `{{ random_choice(a, b, c) }}` — picks one value randomly
 /// - `{{ random_line(path) }}` — picks a random line from a file
@@ -49,27 +49,35 @@ impl TemplateEngine {
             .map_err(|e| anyhow::anyhow!("failed to parse template '{}': {}", name, e))?;
 
         let tpl = Arc::new(processed);
-        self.templates.write().insert(name.to_string(), Arc::clone(&tpl));
+        self.templates
+            .write()
+            .insert(name.to_string(), Arc::clone(&tpl));
         Ok(tpl)
     }
 
     /// Execute a pre-parsed template with the given context.
-    pub fn execute(&self, template: &ParsedTemplate, ctx: &TemplateContext) -> anyhow::Result<String> {
+    pub fn execute(
+        &self,
+        template: &ParsedTemplate,
+        ctx: &TemplateContext,
+    ) -> anyhow::Result<String> {
         let mut env = Environment::new();
         self.add_functions_to_env(&mut env);
 
         env.add_template("__exec__", template.as_str())
             .map_err(|e| anyhow::anyhow!("failed to add template: {}", e))?;
 
-        let tmpl = env.get_template("__exec__")
+        let tmpl = env
+            .get_template("__exec__")
             .map_err(|e| anyhow::anyhow!("failed to get template: {}", e))?;
 
         // Note: only pass user_id as a variable; uuid is always generated via uuid() function
         // to avoid shadowing the function with a string variable.
-        let result = tmpl.render(minijinja::context! {
-            user_id => &ctx.user_id,
-        })
-        .map_err(|e| anyhow::anyhow!("failed to render template: {}", e))?;
+        let result = tmpl
+            .render(minijinja::context! {
+                user_id => &ctx.user_id,
+            })
+            .map_err(|e| anyhow::anyhow!("failed to render template: {}", e))?;
 
         Ok(result)
     }
@@ -83,13 +91,15 @@ impl TemplateEngine {
         env.add_template("__exec__", &processed)
             .map_err(|e| anyhow::anyhow!("failed to parse template: {}", e))?;
 
-        let tmpl = env.get_template("__exec__")
+        let tmpl = env
+            .get_template("__exec__")
             .map_err(|e| anyhow::anyhow!("failed to get template: {}", e))?;
 
-        let result = tmpl.render(minijinja::context! {
-            user_id => &ctx.user_id,
-        })
-        .map_err(|e| anyhow::anyhow!("failed to render template: {}", e))?;
+        let result = tmpl
+            .render(minijinja::context! {
+                user_id => &ctx.user_id,
+            })
+            .map_err(|e| anyhow::anyhow!("failed to render template: {}", e))?;
 
         Ok(result)
     }
@@ -104,12 +114,14 @@ impl TemplateEngine {
         let file_cache = Arc::clone(&self.file_cache);
 
         env.add_function("random_int", |min: i64, max: i64| -> i64 {
-            if min >= max { min } else { rand::thread_rng().gen_range(min..max) }
+            if min >= max {
+                min
+            } else {
+                rand::thread_rng().gen_range(min..max)
+            }
         });
 
-        env.add_function("uuid", || -> String {
-            uuid::Uuid::new_v4().to_string()
-        });
+        env.add_function("uuid", || -> String { uuid::Uuid::new_v4().to_string() });
 
         env.add_function("random_choice", |values: Vec<String>| -> String {
             if values.is_empty() {

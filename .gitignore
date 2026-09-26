@@ -15,3 +15,6 @@
 .vscode/
 .antigravity/
 .qwen
+
+# Compiled binary accidentally committed at the repo root
+/rustress

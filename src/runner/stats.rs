@@ -1,5 +1,5 @@
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
 use tokio::sync::mpsc;
 
@@ -21,7 +21,6 @@ pub struct RunStats {
     /// ceiling was saturated. Non-zero means the generator, not the target,
     /// was the bottleneck.
     pub dropped_scheduled: Arc<AtomicU64>,
-    pub spawned: Arc<AtomicU64>,
     updates: mpsc::UnboundedSender<StatsSnapshot>,
 }
 
@@ -32,7 +31,6 @@ impl RunStats {
             results: ResultLog::default(),
             inflight: Arc::new(AtomicI64::new(0)),
             dropped_scheduled: Arc::new(AtomicU64::new(0)),
-            spawned: Arc::new(AtomicU64::new(0)),
             updates,
         }
     }
@@ -42,14 +40,6 @@ impl RunStats {
     /// This is incremented at *dispatch* time, not when the request task
     /// begins executing. Counting at task start would make queued tasks
     /// invisible to the drain barrier, and the run would abandon them.
-    pub fn inc_spawned(&self) {
-        self.spawned.fetch_add(1, Ordering::SeqCst);
-    }
-
-    pub fn spawned_count(&self) -> u64 {
-        self.spawned.load(Ordering::SeqCst)
-    }
-
     pub fn inc_inflight(&self) {
         self.inflight.fetch_add(1, Ordering::SeqCst);
     }
@@ -64,7 +54,19 @@ impl RunStats {
 
     /// Count a request the scheduler could not dispatch due to saturation.
     pub fn record_scheduled_drop(&self) {
-        self.dropped_scheduled.fetch_add(1, Ordering::Relaxed);
+        self.record_scheduled_drops(1);
+    }
+
+    /// Count `count` shed requests in a single atomic operation.
+    ///
+    /// A batched add matters when resynchronising the schedule: the number of
+    /// skipped slots is `elapsed / period`, which reaches millions at high
+    /// RPS, and one `fetch_add` per slot would spin on the scheduler task
+    /// itself — manufacturing the very slip it is accounting for.
+    pub fn record_scheduled_drops(&self, count: u64) {
+        if count > 0 {
+            self.dropped_scheduled.fetch_add(count, Ordering::Relaxed);
+        }
     }
 
     /// Total scheduler-side drops for this run.

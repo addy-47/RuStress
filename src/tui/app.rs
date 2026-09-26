@@ -1,8 +1,8 @@
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
-use ratatui::Frame;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -10,10 +10,10 @@ use tokio_util::sync::CancellationToken;
 use super::EventLoop;
 use super::TerminalGuard;
 use super::Theme;
-use crate::tui::views::helpers::vertical_chunks;
-use crate::tui::views::{DashboardView, RunnerView};
 use crate::core::config::Config;
 use crate::core::snapshot::StatsSnapshot;
+use crate::tui::views::helpers::vertical_chunks;
+use crate::tui::views::{DashboardView, RunnerView};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AppView {
@@ -65,23 +65,39 @@ impl App {
         // Global keys (work on any view)
         match (key.modifiers, key.code) {
             (_, KeyCode::Char('c')) | (_, KeyCode::Char('q'))
-                if key.modifiers.contains(KeyModifiers::CONTROL) => return true,
+                if key.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                return true;
+            }
             (_, KeyCode::Char('s'))
-                if key.modifiers.contains(KeyModifiers::CONTROL) && self.run_active => {
-                    self.stop_run();
-                    return false;
-                }
+                if key.modifiers.contains(KeyModifiers::CONTROL) && self.run_active =>
+            {
+                self.stop_run();
+                return false;
+            }
             // Tab switching
-            (_, KeyCode::Char('1')) => { self.view = AppView::Runner; return false; }
-            (_, KeyCode::Char('2')) => { self.view = AppView::Dashboard; return false; }
+            (_, KeyCode::Char('1')) => {
+                self.view = AppView::Runner;
+                return false;
+            }
+            (_, KeyCode::Char('2')) => {
+                self.view = AppView::Dashboard;
+                return false;
+            }
             (_, KeyCode::Tab) if self.view == AppView::Dashboard => {
-                self.view = AppView::Runner; return false;
+                self.view = AppView::Runner;
+                return false;
             }
             (_, KeyCode::BackTab) if self.view == AppView::Dashboard => {
-                self.view = AppView::Runner; return false;
+                self.view = AppView::Runner;
+                return false;
             }
             (KeyModifiers::SHIFT, KeyCode::Left) | (KeyModifiers::SHIFT, KeyCode::Right) => {
-                self.view = if self.view == AppView::Runner { AppView::Dashboard } else { AppView::Runner };
+                self.view = if self.view == AppView::Runner {
+                    AppView::Dashboard
+                } else {
+                    AppView::Runner
+                };
                 return false;
             }
             _ => {}
@@ -176,9 +192,9 @@ impl App {
         let chunks = vertical_chunks(
             area,
             vec![
-                Constraint::Length(3),  // Header
-                Constraint::Min(10),    // Content
-                Constraint::Length(3),  // Help bar
+                Constraint::Length(3), // Header
+                Constraint::Min(10),   // Content
+                Constraint::Length(3), // Help bar
             ],
         );
 
@@ -227,7 +243,12 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, theme: &Theme, active_tab: &
         })
         .collect();
 
-    let left = Span::styled(" STEADYQ ", Style::default().fg(theme.primary).add_modifier(Modifier::BOLD));
+    let left = Span::styled(
+        " STEADYQ ",
+        Style::default()
+            .fg(theme.primary)
+            .add_modifier(Modifier::BOLD),
+    );
     let block = Block::default()
         .borders(Borders::BOTTOM)
         .border_style(Style::default().fg(theme.border))
@@ -263,7 +284,10 @@ fn render_help_bar(frame: &mut Frame<'_>, area: Rect, theme: &Theme, active_tab:
             vec![
                 Span::styled(
                     format!(" {} ", key),
-                    Style::default().fg(theme.bg).bg(theme.secondary).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(theme.bg)
+                        .bg(theme.secondary)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(format!(" {} ", desc), Style::default().fg(theme.text)),
                 Span::raw("   "),
@@ -296,10 +320,18 @@ fn render_status_overlay(frame: &mut Frame<'_>, area: Rect, msg: &str, theme: &T
     frame.render_widget(Clear, popup_area);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.warning).add_modifier(Modifier::BOLD))
+        .border_style(
+            Style::default()
+                .fg(theme.warning)
+                .add_modifier(Modifier::BOLD),
+        )
         .style(Style::default().bg(theme.highlight).fg(theme.warning));
     let para = Paragraph::new(Line::from(msg))
-        .style(Style::default().fg(theme.warning).add_modifier(Modifier::BOLD))
+        .style(
+            Style::default()
+                .fg(theme.warning)
+                .add_modifier(Modifier::BOLD),
+        )
         .block(block);
     frame.render_widget(para, popup_area);
 }
@@ -317,10 +349,19 @@ pub async fn run_tui(
     let mut app = App::new(cfg);
     let mut events = EventLoop::new(stats_rx);
 
+    // Redraw only when state actually changed. The poll timeout bounds this
+    // loop at ~100 Hz, and an unconditional full redraw at that rate competes
+    // with the load generator for the same cores. Snapshots arrive at 10 Hz, so
+    // this settles at 10 redraws per second.
+    let mut dirty = true;
+
     loop {
-        terminal.draw(|frame| {
-            app.render(frame, frame.area());
-        })?;
+        if dirty {
+            terminal.draw(|frame| {
+                app.render(frame, frame.area());
+            })?;
+            dirty = false;
+        }
 
         if crossterm::event::poll(Duration::from_millis(10))? {
             match crossterm::event::read()? {
@@ -328,9 +369,11 @@ pub async fn run_tui(
                     if app.handle_key(key) {
                         break;
                     }
+                    dirty = true;
                 }
                 crossterm::event::Event::Mouse(mouse) => {
                     app.handle_mouse(mouse);
+                    dirty = true;
                 }
                 _ => {}
             }
@@ -338,6 +381,7 @@ pub async fn run_tui(
 
         if let Some(snap) = events.poll(Duration::ZERO).await {
             app.handle_stats(snap);
+            dirty = true;
         }
     }
 

@@ -104,4 +104,60 @@ mod tests {
         // Past end
         assert_eq!(current_rps(&c, 50.0), 0.0);
     }
+
+    #[test]
+    fn ramp_up_ends_exactly_at_the_full_rate() {
+        let c = cfg(10, 5, 0, 100);
+        assert!(
+            (current_rps(&c, 9.999) - 99.99).abs() < 0.01,
+            "the last instant of ramp-up must still be ramping"
+        );
+        assert_eq!(
+            current_rps(&c, 10.0),
+            100.0,
+            "the instant ramp-up ends must already be the full rate"
+        );
+    }
+
+    #[test]
+    fn steady_ends_exactly_at_the_start_of_ramp_down() {
+        let c = cfg(0, 10, 10, 100);
+        assert_eq!(current_rps(&c, 9.999), 100.0);
+        assert!(
+            (current_rps(&c, 10.0) - 100.0).abs() < 0.01,
+            "ramp-down must start from the full rate, not from zero"
+        );
+        assert!(
+            (current_rps(&c, 10.001) - 99.999).abs() < 0.01,
+            "the first instant past steady must have begun to decline"
+        );
+    }
+
+    #[test]
+    fn no_ramp_down_means_the_rate_stops_at_the_end_of_steady() {
+        let c = cfg(5, 5, 0, 100);
+        assert_eq!(
+            current_rps(&c, 10.0),
+            0.0,
+            "with no ramp-down configured the generator must stop, not hold the \
+             full rate until the caller notices"
+        );
+        assert_eq!(current_rps(&c, 11.0), 0.0);
+    }
+
+    #[test]
+    fn a_run_with_no_steady_phase_ramps_straight_down_from_the_full_rate() {
+        let c = cfg(0, 0, 10, 100);
+        assert_eq!(current_rps(&c, 0.0), 100.0);
+        assert!((current_rps(&c, 5.0) - 50.0).abs() < 0.1);
+        assert_eq!(current_rps(&c, 10.0), 0.0);
+    }
+
+    #[test]
+    fn ramp_up_with_no_steady_phase_still_reaches_the_full_rate() {
+        let c = cfg(10, 0, 10, 100);
+        assert!((current_rps(&c, 10.0) - 100.0).abs() < 0.1);
+        assert!((current_rps(&c, 15.0) - 50.0).abs() < 0.1);
+        assert_eq!(current_rps(&c, 20.0), 0.0);
+    }
 }

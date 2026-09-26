@@ -4,7 +4,7 @@ use reqwest::Response;
 use tokio::process::Command;
 
 use crate::core::config::Config;
-use crate::core::constants::{MAX_CAPTURED_BODY_BYTES, MAX_DRAINED_BODY_BYTES};
+use crate::core::constants::MAX_CAPTURED_BODY_BYTES;
 use crate::core::result::ExperimentResult;
 use crate::runner::request::PreparedRequest;
 use crate::runner::stats::RunStats;
@@ -12,7 +12,10 @@ use crate::templates::{TemplateContext, TemplateEngine};
 
 /// Appended to a captured body that was cut short at the capture cap, so a
 /// truncated diagnostic is never mistaken for a complete one.
-const TRUNCATION_MARKER: &str = "\n...[truncated]";
+///
+/// Public so a report consumer — or a test — can detect truncation from the
+/// constant rather than by matching a string literal that will drift.
+pub const TRUNCATION_MARKER: &str = "\n...[truncated]";
 
 /// Outcome of a single HTTP exchange, with body capture already bounded.
 struct HttpOutcome {
@@ -59,7 +62,11 @@ pub async fn execute_http(
         },
     };
 
-    let success = (200..300).contains(&outcome.status);
+    // A 2xx status alone is not a success. If the body stream failed, the
+    // response was unusable, and counting it as a success lets a run report
+    // 100% success against a target returning nothing but broken payloads
+    // while `error_counts` disagrees with the headline number.
+    let success = outcome.error.is_none() && (200..300).contains(&outcome.status);
     stats.record(ExperimentResult {
         timestamp: chrono::Utc::now(),
         latency: Instant::now().saturating_duration_since(scheduled),
@@ -75,13 +82,18 @@ pub async fn execute_http(
     });
 }
 
-/// Drain a response body, counting bytes and capturing a bounded prefix.
+/// Drain a response body to EOF, counting bytes and capturing a bounded prefix.
 ///
-/// The body is never fully materialised. Bytes are counted as they stream past
+/// The body is never fully materialised: bytes are counted as they stream past
 /// so the throughput metric stays correct for chunked responses, which report
-/// no `content-length`. Capture stops at [`MAX_CAPTURED_BODY_BYTES`] because a
-/// load generator cannot trust the size of a body from a target it does not
-/// control.
+/// no `content-length`, and only the first [`MAX_CAPTURED_BODY_BYTES`] are
+/// retained because a load generator cannot trust the size of a body from a
+/// target it does not control.
+///
+/// Draining to EOF is deliberate. Abandoning the body early would forfeit
+/// connection reuse, so a target serving large bodies would pay a fresh
+/// TCP+TLS handshake on every request — and that handshake would land inside
+/// the measured service time, corrupting the result.
 async fn read_response(mut response: Response) -> HttpOutcome {
     let status = response.status().as_u16();
     let mut bytes = 0u64;
@@ -102,9 +114,6 @@ async fn read_response(mut response: Response) -> HttpOutcome {
                     }
                 } else {
                     truncated = true;
-                }
-                if bytes >= MAX_DRAINED_BODY_BYTES {
-                    break;
                 }
             }
             Ok(None) => break,
@@ -226,9 +235,8 @@ fn truncate_capture(text: &str) -> String {
 
 /// Strip redundant transport prefixes from a reqwest error message.
 fn clean_error_msg(message: &str) -> String {
-    let interesting = message.contains("dial")
-        || message.contains("timeout")
-        || message.contains("connect");
+    let interesting =
+        message.contains("dial") || message.contains("timeout") || message.contains("connect");
     if interesting {
         if let Some(idx) = message.rfind(": ") {
             return message[idx + 2..].to_string();
@@ -272,5 +280,36 @@ mod tests {
         let multibyte = "é".repeat(MAX_CAPTURED_BODY_BYTES);
         let capped = truncate_capture(&multibyte);
         assert_eq!(capped.chars().count(), MAX_CAPTURED_BODY_BYTES);
+    }
+
+    #[test]
+    fn truncate_capture_at_exactly_the_cap_is_unchanged() {
+        let text = "a".repeat(MAX_CAPTURED_BODY_BYTES);
+        assert_eq!(
+            truncate_capture(&text),
+            text,
+            "a capture of exactly the cap is complete and must pass through byte \
+             for byte, marker or not"
+        );
+    }
+
+    #[test]
+    fn truncate_capture_never_splits_a_multibyte_character() {
+        let multibyte = "é".repeat(MAX_CAPTURED_BODY_BYTES + 8);
+        let capped = truncate_capture(&multibyte);
+        assert_eq!(capped.chars().count(), MAX_CAPTURED_BODY_BYTES);
+        assert!(
+            std::str::from_utf8(capped.as_bytes()).is_ok(),
+            "a cut diagnostic must remain valid UTF-8; a split character is written \
+             into a CSV and JSON report as a replacement glyph"
+        );
+    }
+
+    #[test]
+    fn a_truncated_capture_is_one_char_shorter_not_one_byte_shorter() {
+        let text = "a".repeat(MAX_CAPTURED_BODY_BYTES + 1);
+        let capped = truncate_capture(&text);
+        assert_eq!(capped.chars().count(), MAX_CAPTURED_BODY_BYTES);
+        assert_eq!(capped.len(), MAX_CAPTURED_BODY_BYTES);
     }
 }
