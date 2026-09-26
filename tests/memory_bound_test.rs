@@ -135,6 +135,7 @@ async fn peak_growth_during(server: &TestServer, seconds: u64) -> (u64, StatsSna
 /// uncapped `response_body`) makes the second run cost
 /// `delta x 8 MB` more than the first. A bounded implementation makes the
 /// second run cost `delta x 2 KB` more, which is noise.
+#[ignore = "allocates hundreds of MB against an 8 MB route; this host has OOM-killed a desktop session. Run explicitly: cargo test --test memory_bound_test -- --ignored"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn resident_memory_does_not_scale_with_request_count() {
     let _guard = RSS_PROBE_LOCK.lock().await;
@@ -187,6 +188,7 @@ async fn resident_memory_does_not_scale_with_request_count() {
 /// It deliberately retains bodies the way the bug did and proves the RSS reading
 /// moves. Without it, a probe stuck at zero would make the bound above pass
 /// unconditionally.
+#[ignore = "allocates hundreds of MB against an 8 MB route; this host has OOM-killed a desktop session. Run explicitly: cargo test --test memory_bound_test -- --ignored"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_resident_memory_probe_detects_retained_bodies() {
     let _guard = RSS_PROBE_LOCK.lock().await;

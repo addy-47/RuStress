@@ -42,7 +42,7 @@ impl LoadEngine {
     /// Create a new load engine bound to a stats channel.
     pub fn new(
         cfg: Config,
-        updates: tokio::sync::mpsc::UnboundedSender<crate::core::snapshot::StatsSnapshot>,
+        updates: tokio::sync::mpsc::Sender<crate::core::snapshot::StatsSnapshot>,
     ) -> anyhow::Result<Self> {
         // Validation lives here, not in the CLI, so that a library embedder
         // cannot bypass it. Without this call every bound in `Config` is inert

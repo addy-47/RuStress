@@ -1,5 +1,5 @@
 use crate::core::config::Config;
-use crate::core::constants::PROGRESS_UPDATE_INTERVAL_MS;
+use crate::core::constants::{PROGRESS_UPDATE_INTERVAL_MS, STATS_CHANNEL_CAPACITY};
 use crate::core::snapshot::StatsSnapshot;
 use crate::runner::LoadEngine;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -29,7 +29,7 @@ pub async fn run_headless(cfg: Config) -> anyhow::Result<()> {
     }
     println!();
 
-    let (tx, rx) = mpsc::unbounded_channel();
+    let (tx, rx) = mpsc::channel(STATS_CHANNEL_CAPACITY);
     let engine = LoadEngine::new(cfg.clone(), tx)?;
     let stats = Arc::clone(engine.stats());
 

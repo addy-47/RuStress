@@ -31,7 +31,9 @@ use std::env;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 
-use rustress::core::constants::{MAX_CAPTURED_BODY_BYTES, MAX_TRACKED_ERROR_KEYS};
+use rustress::core::constants::{
+    MAX_CAPTURED_BODY_BYTES, MAX_TRACKED_ERROR_KEYS, STATS_CHANNEL_CAPACITY,
+};
 use rustress::core::result::ExperimentResult;
 use rustress::core::snapshot::StatsSnapshot;
 use rustress::export::{export_csv, export_json, export_summary};
@@ -312,7 +314,7 @@ fn main() {
     );
 
     // --- the UI read path ------------------------------------------------------
-    let (tx, _rx) = mpsc::unbounded_channel();
+    let (tx, _rx) = mpsc::channel(STATS_CHANNEL_CAPACITY);
     let run_stats = RunStats::new(tx);
     for _ in 0..10_000 {
         run_stats.record(result(200, true, None));

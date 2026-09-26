@@ -21,11 +21,11 @@ pub struct RunStats {
     /// ceiling was saturated. Non-zero means the generator, not the target,
     /// was the bottleneck.
     pub dropped_scheduled: Arc<AtomicU64>,
-    updates: mpsc::UnboundedSender<StatsSnapshot>,
+    updates: mpsc::Sender<StatsSnapshot>,
 }
 
 impl RunStats {
-    pub fn new(updates: mpsc::UnboundedSender<StatsSnapshot>) -> Self {
+    pub fn new(updates: mpsc::Sender<StatsSnapshot>) -> Self {
         Self {
             collector: Arc::new(StatsCollector::new()),
             results: ResultLog::default(),
@@ -96,8 +96,15 @@ impl RunStats {
     }
 
     /// Emit a snapshot to the UI channel.
+    /// Publish a progress frame, dropping it if the consumer is behind.
+    ///
+    /// `try_send` rather than `send`: awaiting here would apply backpressure to
+    /// the engine's ticker for the sake of a display hint, and a full channel
+    /// means the consumer has newer-or-equal information than this frame
+    /// anyway. A dropped frame never loses a measurement, because the final
+    /// summary reads the counters directly rather than trusting these frames.
     pub fn publish_snapshot(&self) {
-        let _ = self.updates.send(self.snapshot());
+        let _ = self.updates.try_send(self.snapshot());
     }
 }
 
@@ -129,11 +136,11 @@ impl Drop for InflightGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::constants::RESULT_RING_CAPACITY;
+    use crate::core::constants::{RESULT_RING_CAPACITY, STATS_CHANNEL_CAPACITY};
     use std::panic;
 
     fn stats() -> Arc<RunStats> {
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = mpsc::channel(STATS_CHANNEL_CAPACITY);
         Arc::new(RunStats::new(tx))
     }
 

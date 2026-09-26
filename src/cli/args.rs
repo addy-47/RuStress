@@ -75,6 +75,23 @@ pub struct Cli {
     #[arg(long)]
     pub out: Option<String>,
 
+    /// Max concurrent in-flight requests (open-loop/RPS mode only)
+    #[arg(long)]
+    pub max_concurrency: Option<u32>,
+
+    /// Max idle connections retained per host.
+    ///
+    /// This is the knob that caps resident memory on large responses. A pooled
+    /// connection keeps its read buffer, so a high value costs roughly
+    /// `value * ~400-800 KB`. Higher values measure connection reuse more
+    /// faithfully by avoiding handshakes; lower values cap memory.
+    #[arg(long)]
+    pub pool_max_idle_per_host: Option<u32>,
+
+    /// Seconds an unused connection is kept warm
+    #[arg(long)]
+    pub pool_idle_timeout: Option<u64>,
+
     /// Config file path (TOML)
     #[arg(long)]
     pub config: Option<String>,
@@ -152,6 +169,15 @@ impl Cli {
         }
         if let Some(timeout) = self.timeout {
             cfg.timeout_secs = timeout;
+        }
+        if let Some(mc) = self.max_concurrency {
+            cfg.max_concurrency = mc;
+        }
+        if let Some(p) = self.pool_max_idle_per_host {
+            cfg.pool_max_idle_per_host = p;
+        }
+        if let Some(t) = self.pool_idle_timeout {
+            cfg.pool_idle_timeout_secs = t;
         }
 
         // Parse headers

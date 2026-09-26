@@ -27,6 +27,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use rustress::core::config::Config;
+use rustress::core::constants::STATS_CHANNEL_CAPACITY;
 use rustress::core::result::ExperimentResult;
 use rustress::core::snapshot::StatsSnapshot;
 use rustress::runner::LoadEngine;
@@ -78,7 +79,7 @@ pub async fn dummy_server() -> TestServer {
 /// A `LoadEngine` bound to a private snapshot channel, plus its cancel token.
 pub struct Harness {
     engine: LoadEngine,
-    pub updates: mpsc::UnboundedReceiver<StatsSnapshot>,
+    pub updates: mpsc::Receiver<StatsSnapshot>,
     cancel: CancellationToken,
 }
 
@@ -88,7 +89,7 @@ impl Harness {
     /// Errors propagate rather than panicking so the config-validation tests
     /// can assert on the rejection instead of on a panic message.
     pub fn new(cfg: Config) -> anyhow::Result<Self> {
-        let (tx, updates) = mpsc::unbounded_channel();
+        let (tx, updates) = mpsc::channel(STATS_CHANNEL_CAPACITY);
         let engine = LoadEngine::new(cfg, tx)?;
         Ok(Self {
             engine,

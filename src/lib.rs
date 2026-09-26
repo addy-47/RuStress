@@ -31,7 +31,7 @@
 //!     steady_dur_secs: 10,
 //!     ..Default::default()
 //! };
-//! let (tx, _rx) = mpsc::unbounded_channel();
+//! let (tx, _rx) = mpsc::channel(rustress::core::constants::STATS_CHANNEL_CAPACITY);
 //! let engine = LoadEngine::new(cfg, tx)?;
 //! engine.run(tokio_util::sync::CancellationToken::new()).await;
 //! # Ok(())

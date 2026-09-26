@@ -33,7 +33,7 @@ mod tests {
     #[test]
     fn test_banner_has_version() {
         let b = banner();
-        assert!(b.contains("v0.1.0"));
+        assert!(b.contains(&format!("v{}", env!("CARGO_PKG_VERSION"))));
     }
 
     #[test]

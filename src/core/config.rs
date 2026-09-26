@@ -4,8 +4,9 @@ use std::time::Duration;
 
 use crate::core::constants::{
     DEFAULT_DURATION_SECS, DEFAULT_MAX_CONCURRENCY, DEFAULT_METHOD, DEFAULT_NUM_USERS,
-    DEFAULT_TARGET_RPS, DEFAULT_TIMEOUT_SECS, MAX_ALLOWED_CONCURRENCY, MAX_ALLOWED_RPS,
-    MAX_ALLOWED_USERS, MIN_ALLOWED_CONCURRENCY,
+    DEFAULT_POOL_IDLE_TIMEOUT_SECS, DEFAULT_POOL_MAX_IDLE_PER_HOST, DEFAULT_TARGET_RPS,
+    DEFAULT_TIMEOUT_SECS, MAX_ALLOWED_CONCURRENCY, MAX_ALLOWED_RPS, MAX_ALLOWED_USERS,
+    MAX_IDLE_CONNS_PER_HOST, MAX_POOL_IDLE_TIMEOUT_SECS, MIN_ALLOWED_CONCURRENCY,
 };
 
 /// Load generation mode.
@@ -74,9 +75,32 @@ pub struct Config {
     /// Output file prefix for reports.
     pub out_prefix: Option<String>,
 
-    /// Max concurrent in-flight requests (prevents OOM/Task explosion).
+    /// Max concurrent **in-flight** requests. Bounds work, not memory: it is
+    /// the number of requests executing at once. **Open-loop (RPS) mode only.**
+    ///
+    /// Closed-loop (Users) mode is bounded by `num_users` alone, by design --
+    /// a virtual user is the unit of concurrency there, and adding a second
+    /// independent control would make the mode's throughput unexplainable.
     #[serde(default = "default_max_concurrency")]
     pub max_concurrency: u32,
+
+    /// Max **idle** connections retained per host after a request finishes.
+    ///
+    /// A *different* bound from `max_concurrency`: that one limits requests
+    /// executing, this one limits sockets retained afterwards. Retained sockets
+    /// are not free -- each keeps a hyper read buffer sized for the largest
+    /// body it has carried -- but measurement shows this is a secondary term.
+    /// The dominant one is `max_concurrency`; see its docs for the numbers.
+    ///
+    /// Raising this reduces handshakes and measures connection reuse more
+    /// faithfully; lowering it caps memory. It is a measurement trade-off, not
+    /// a free win.
+    #[serde(default = "default_pool_max_idle_per_host")]
+    pub pool_max_idle_per_host: u32,
+
+    /// How long an unused connection is kept warm, in seconds.
+    #[serde(default = "default_pool_idle_timeout")]
+    pub pool_idle_timeout_secs: u64,
 }
 
 impl Default for Config {
@@ -97,6 +121,8 @@ impl Default for Config {
             command: None,
             out_prefix: None,
             max_concurrency: default_max_concurrency(),
+            pool_max_idle_per_host: default_pool_max_idle_per_host(),
+            pool_idle_timeout_secs: default_pool_idle_timeout(),
         }
     }
 }
@@ -148,6 +174,22 @@ impl Config {
             errors.push(format!(
                 "max_concurrency must be at most {MAX_ALLOWED_CONCURRENCY} (got {})",
                 self.max_concurrency
+            ));
+        }
+
+        if self.pool_max_idle_per_host == 0 {
+            errors.push("pool_max_idle_per_host must be greater than 0".into());
+        }
+        if self.pool_max_idle_per_host > MAX_IDLE_CONNS_PER_HOST as u32 {
+            errors.push(format!(
+                "pool_max_idle_per_host must be at most {MAX_IDLE_CONNS_PER_HOST} (got {})",
+                self.pool_max_idle_per_host
+            ));
+        }
+        if self.pool_idle_timeout_secs > MAX_POOL_IDLE_TIMEOUT_SECS {
+            errors.push(format!(
+                "pool_idle_timeout_secs must be at most {MAX_POOL_IDLE_TIMEOUT_SECS} (got {})",
+                self.pool_idle_timeout_secs
             ));
         }
 
@@ -203,6 +245,14 @@ fn default_num_users() -> u32 {
 
 fn default_max_concurrency() -> u32 {
     DEFAULT_MAX_CONCURRENCY
+}
+
+fn default_pool_max_idle_per_host() -> u32 {
+    DEFAULT_POOL_MAX_IDLE_PER_HOST as u32
+}
+
+fn default_pool_idle_timeout() -> u64 {
+    DEFAULT_POOL_IDLE_TIMEOUT_SECS
 }
 
 #[cfg(test)]

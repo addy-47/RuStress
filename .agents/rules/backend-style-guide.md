@@ -153,7 +153,7 @@ Getting these wrong produces numbers that look like results and are not.
 ## 9. Testability Seams
 
 - **The public API is the test surface.** `tests/` may only use `rustress::*` re-exports.
-- **No mocks.** See `.agents/rules/testing-style-guilde.md`. The `dummy` axum server is a real HTTP server, so using it is not mocking — a hand-rolled `MockHttpClient` is.
+- **No mocks.** See `.agents/rules/testing-style-guide.md`. The `dummy` axum server is a real HTTP server, so using it is not mocking — a hand-rolled `MockHttpClient` is.
 - **Seams that must exist for zero-mock testing:** `PreparedRequest::new` (pure, sync), `run_rps`/`run_users` (take a `CancellationToken`), `RunStats` (observable counters), `ResultLog` (observable eviction), `TemplateEngine` (real minijinja over a real filesystem).
 - **Never introduce a module-level `static` that forms a black box** an upstream actor cannot feed or a test cannot observe.
 
@@ -181,4 +181,4 @@ All four must be clean. `cargo doc --no-deps` must build without warnings before
 | Benchmark | `benches/<feature>_bench.rs`, `harness = false` | `cargo bench` | public API |
 | Utility | `examples/<name>.rs` | `cargo run --release --example <name>` | public API |
 
-Full standards: `.agents/rules/testing-style-guilde.md`.
+Full standards: `.agents/rules/testing-style-guide.md`.

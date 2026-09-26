@@ -1,22 +1,24 @@
 use crate::core::config::Config;
 use crate::core::snapshot::StatsSnapshot;
-use crate::runner::LoadEngine;
-use tokio::sync::mpsc;
 
 /// Run the interactive TUI.
+///
+/// The engine is created, started and drained by `runner::RunController` inside
+/// the event loop. This function previously built a `LoadEngine`, never ran it,
+/// and printed a summary of zero requests -- the dashboard's "RUNNING" state
+/// had no traffic behind it.
 pub async fn run_tui(cfg: Config) -> anyhow::Result<()> {
-    let (tx, rx) = mpsc::unbounded_channel();
-    let engine = LoadEngine::new(cfg.clone(), tx)?;
-
-    crate::tui::run_tui(cfg, rx).await?;
+    let stats = crate::tui::run_tui(cfg).await?;
 
     // Report from the authoritative counters. The retention ring holds at most
     // RESULT_RING_CAPACITY samples, so deriving totals from it would print
     // "Total: 50000" for a three-million-request run and compute the success
     // rate over the last 50k alone.
-    let final_snap = engine.stats().snapshot();
-    if final_snap.requests > 0 {
-        print_summary(&final_snap);
+    if let Some(stats) = stats {
+        let final_snap = stats.snapshot();
+        if final_snap.requests > 0 {
+            print_summary(&final_snap);
+        }
     }
 
     Ok(())

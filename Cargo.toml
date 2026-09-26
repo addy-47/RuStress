@@ -1,6 +1,6 @@
 [package]
 name = "rustress"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.85"
 description = "High-performance load testing engine with an interactive terminal dashboard. Open-loop (RPS) and closed-loop (virtual users) load models with live p50/p90/p95/p99 latency telemetry."

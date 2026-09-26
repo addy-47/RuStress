@@ -175,12 +175,6 @@ rustress --url http://localhost:8080/fast \
 
 ---
 
-> ⚠️ **Status: the interactive TUI does not generate load yet.** The form and
-> dashboard render correctly, and `Ctrl+R` switches to the Dashboard, but no
-> engine is started — the dashboard displays zeros rather than live telemetry.
-> **Use headless mode (`--url`, `--rate`, `--users`) to actually run a load
-> test today.** Wiring the engine to the TUI is tracked in `AGENTS.md` §5.
-
 ## 🎮 Interactive TUI Guide
 
 When you run `rustress` without a URL, you enter the **Interactive Configurator**.
@@ -189,7 +183,7 @@ When you run `rustress` without a URL, you enter the **Interactive Configurator*
 This view allows you to tweak your test parameters using a form-based interface.
 - **Navigation**: Use `Tab` or `Arrow Keys` to move between fields.
 - **Selection**: Use `Space` to toggle the Load Mode.
-- **Execution**: Press `Ctrl+R` to switch to the Dashboard. *(No engine is started yet — see the warning above.)*
+- **Execution**: Press `Ctrl+R` to start the run and switch to the Dashboard. The configuration form is validated on start, so an out-of-range value is reported in the status line rather than taking the process down.
 
 ### Dashboard View
 The live engine view shows real-time performance telemetry.
@@ -197,7 +191,9 @@ The live engine view shows real-time performance telemetry.
 - **Left Panel**: Aggregated stats (Total, Success, Error, In-Flight).
 - **Latency Graph**: Sparkline showing P99 over the last 60 seconds.
 - **Status Codes**: A bar chart or list of current HTTP responses categorized by class.
-- **Real-time Adjust**: Press `+` or `-` to adjust the displayed target value. *(Not wired to the scheduler yet.)*
+- **Stopping**: Press `Ctrl+S` to stop. In-flight requests are drained rather than abandoned, and the run reports as `DRAINING` until the barrier clears.
+- **Real-time Adjust**: Press `+` or `-` to adjust the displayed target value. *(A display control; not wired to the scheduler.)*
+- **Shutdown**: Quitting cancels the run and waits for the drain barrier *before* restoring the terminal, so a run in flight can never race terminal teardown.
 
 ---
 
@@ -240,10 +236,60 @@ A deep telemetry format including `service_time` vs `queue_wait_time`. If RuStre
 
 ## ⚙️ Performance Tuning
 
-To get the most out of RuStress on high-end hardware:
-1. **Increase File Descriptors**: Run `ulimit -n 65535` to ensure the OS doesn't block outgoing connections.
-2. **Thread Management**: RuStress automatically uses all available CPU cores via the Tokio multi-threaded scheduler.
-3. **Timeout Selection**: On slow networks, increasing `--timeout` can prevent false-positive failures due to network jitter.
+1. **Increase File Descriptors**: Run `ulimit -n 65535` so the OS does not block outgoing connections.
+2. **Thread Management**: RuStress uses all available CPU cores via the Tokio multi-threaded scheduler.
+3. **Timeout Selection**: On slow networks, increasing `--timeout` prevents false-positive failures from network jitter.
+
+### Memory: what actually costs it
+
+Memory is a function of **concurrent in-flight requests**, not of request count.
+A 3-million-request run against a small response costs the same as a 3,000-request
+run; that bound is tested. The ceiling is instead set by `max_concurrency`,
+because each in-flight request holds a hyper HTTP/1 read buffer grown to service
+the body it is reading, and reqwest exposes no knob to shrink it.
+
+Measured at 500 RPS against the 8 MB `/big` route, with the connection pool held
+constant so the two bounds cannot be confused:
+
+| `--max-concurrency` | Peak RSS |
+|---|---|
+| 8 | 53 MB |
+| 64 | 121 MB |
+| 256 | 254 MB |
+| 1000 | 750 MB |
+
+The same 1000 in-flight run against a *small*-body route peaks at **7.3 MB** — the
+buffer never grows past what a small response needs. The cost appears exactly
+when a load generator is doing its job, so it cannot be tuned away.
+
+**The default is 128** (~96 MB worst case). Raising it is a real trade-off: a
+slower target needs more requests in flight to sustain a given RPS, so a low
+ceiling makes the *generator* the bottleneck. When that happens RuStress drops
+and counts requests rather than queueing them, reports `dropped_scheduled`, and
+marks the run's latency figures as not describing the target. A run that quietly
+queued instead would report its own backlog as server latency.
+
+`--pool-max-idle-per-host` (default 64) is a separate knob: it bounds sockets
+*retained after* a request finishes, not requests in flight. A larger pool
+measures connection reuse more faithfully because fewer TCP and TLS handshakes
+appear in the latency figures; a smaller one caps retained memory. The two are
+independent by design.
+
+Run `cargo run --release --example bounded_memory` to reproduce the table.
+
+### Building on a memory-constrained machine
+
+This dependency tree has OOM-killed a 15 GB / 8-core host twice when built
+uncapped. Every cargo invocation should go through the wrapper:
+
+```bash
+./scripts/safe-cargo.sh build --release
+./scripts/safe-cargo.sh test --all-targets
+```
+
+It applies a hard cgroup v2 `MemoryMax` (6 GB by default) so an over-budget
+build is killed instead of taking the machine with it. A killed build is exit
+137 or 143 — that is the failsafe working, not a bug.
 
 ---
 

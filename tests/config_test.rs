@@ -30,6 +30,7 @@ use rustress::cli::args::Cli;
 use rustress::core::config::{Config, Mode};
 use rustress::core::constants::{
     MAX_ALLOWED_CONCURRENCY, MAX_ALLOWED_RPS, MAX_ALLOWED_USERS, MIN_ALLOWED_CONCURRENCY,
+    STATS_CHANNEL_CAPACITY,
 };
 use rustress::runner::LoadEngine;
 use tokio::sync::mpsc;
@@ -41,7 +42,7 @@ use common::cfg_for;
 /// The check is on the constructor's return value, not on a later run: a bound
 /// enforced anywhere other than construction can be bypassed by an embedder.
 fn rejection_reason(cfg: Config) -> String {
-    let (tx, _rx) = mpsc::unbounded_channel();
+    let (tx, _rx) = mpsc::channel(STATS_CHANNEL_CAPACITY);
     match LoadEngine::new(cfg, tx) {
         Ok(_) => panic!("LoadEngine::new accepted a configuration it must reject"),
         Err(e) => e.to_string(),
@@ -186,7 +187,7 @@ fn a_valid_configuration_is_accepted() {
         headers: IndexMap::new(),
         ..Default::default()
     };
-    let (tx, _rx) = mpsc::unbounded_channel();
+    let (tx, _rx) = mpsc::channel(STATS_CHANNEL_CAPACITY);
     assert!(
         LoadEngine::new(cfg, tx).is_ok(),
         "a well-formed configuration must be accepted"
@@ -208,7 +209,7 @@ fn the_boundary_values_of_every_bound_are_accepted() {
         timeout_secs: 1,
         ..Default::default()
     };
-    let (tx, _rx) = mpsc::unbounded_channel();
+    let (tx, _rx) = mpsc::channel(STATS_CHANNEL_CAPACITY);
     assert!(
         LoadEngine::new(cfg, tx).is_ok(),
         "each documented maximum must itself be accepted"
@@ -221,7 +222,7 @@ fn the_boundary_values_of_every_bound_are_accepted() {
         timeout_secs: 1,
         ..Default::default()
     };
-    let (tx, _rx) = mpsc::unbounded_channel();
+    let (tx, _rx) = mpsc::channel(STATS_CHANNEL_CAPACITY);
     assert!(
         LoadEngine::new(cfg, tx).is_ok(),
         "the documented minimum concurrency must be accepted"

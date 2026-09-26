@@ -42,6 +42,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 
 use rustress::core::config::Config;
+use rustress::core::constants::STATS_CHANNEL_CAPACITY;
 use rustress::core::result::ExperimentResult;
 use rustress::runner::RunStats;
 use rustress::runner::client::build_client;
@@ -255,7 +256,7 @@ fn main() {
 
         let engine = TemplateEngine::new();
         let ctx = TemplateContext::new("bench-user".into());
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = mpsc::channel(STATS_CHANNEL_CAPACITY);
         let stats = Arc::new(RunStats::new(tx));
 
         // --- request construction: once per run, amortised ------------------

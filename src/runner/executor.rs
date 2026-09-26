@@ -1,6 +1,9 @@
 use std::time::Instant;
 
 use reqwest::Response;
+use std::process::Stdio;
+
+use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
 use crate::core::config::Config;
@@ -162,7 +165,7 @@ pub async fn execute_script(
         raw.to_string()
     };
 
-    let output = match Command::new("sh").arg("-c").arg(&command).output().await {
+    let output = match run_script_capped(&command).await {
         Ok(output) => output,
         Err(e) => {
             stats.record(failed_outcome(
@@ -177,16 +180,15 @@ pub async fn execute_script(
         }
     };
 
-    let success = output.status.success();
+    let success = output.success;
     let status = if success {
         200
     } else {
-        output.status.code().unwrap_or(500) as u16
+        output.code.unwrap_or(500) as u16
     };
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let error = (!success).then(|| clean_error_msg(&stderr));
+    let error = (!success).then(|| clean_error_msg(&output.stderr));
     let captured = (!success)
-        .then(|| truncate_capture(&stderr))
+        .then(|| truncate_capture(&output.stderr))
         .filter(|s| !s.is_empty());
 
     stats.record(ExperimentResult {
@@ -196,12 +198,90 @@ pub async fn execute_script(
         queue_wait,
         status,
         success,
-        bytes: output.stdout.len() as i64,
+        bytes: output.stdout_bytes as i64,
         user_id: ctx.user_id.clone(),
         query: "script".to_string(),
         error,
         response_body: captured,
     });
+}
+
+/// Captured script result, with stdout counted but only stderr retained.
+struct ScriptOutput {
+    /// Total bytes the script wrote to stdout, counted as it streamed.
+    stdout_bytes: u64,
+    /// Exit status code, or 128 when the process was signalled.
+    code: Option<i32>,
+    /// Whether the process exited successfully.
+    success: bool,
+    /// Captured stderr, truncated to the capture cap.
+    stderr: String,
+}
+
+/// Run `sh -c command`, counting stdout without retaining it.
+///
+/// `Command::output()` buffers *both* streams to EOF, so a script that prints
+/// without bound exhausts host memory for as long as it runs. A target's
+/// response body is attacker-controlled; a script's output is the same class of
+/// input and gets the same treatment. stdout is drained and counted but
+/// discarded -- only its length is a measurement, which is exactly the same
+/// reasoning the HTTP path uses for a response body -- and stderr is retained
+/// up to the capture cap so a failure still carries a diagnosable message.
+async fn run_script_capped(command: &str) -> std::io::Result<ScriptOutput> {
+    let mut child = Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    let mut stdout = child.stdout.take().expect("stdout was piped");
+    let mut stderr = child.stderr.take().expect("stderr was piped");
+
+    let stdout_task = tokio::spawn(async move {
+        let mut buf = [0u8; 8 * 1024];
+        let mut total = 0u64;
+        loop {
+            match stdout.read(&mut buf).await {
+                Ok(0) => break,
+                Ok(n) => total += n as u64,
+                Err(_) => break,
+            }
+        }
+        total
+    });
+
+    let mut retained: Vec<u8> = Vec::new();
+    let mut stderr_buf = [0u8; 8 * 1024];
+    loop {
+        match stderr.read(&mut stderr_buf).await {
+            Ok(0) => break,
+            Ok(n) => {
+                if retained.len() < MAX_CAPTURED_BODY_BYTES {
+                    let room = MAX_CAPTURED_BODY_BYTES - retained.len();
+                    let take = room.min(n);
+                    retained.extend_from_slice(&stderr_buf[..take]);
+                }
+            }
+            Err(_) => break,
+        }
+    }
+
+    let stdout_bytes = stdout_task.await.unwrap_or(0);
+    let status = child.wait().await?;
+
+    let mut stderr = String::from_utf8_lossy(&retained).into_owned();
+    if retained.len() == MAX_CAPTURED_BODY_BYTES {
+        stderr.push_str(TRUNCATION_MARKER);
+    }
+
+    Ok(ScriptOutput {
+        stdout_bytes,
+        code: status.code(),
+        success: status.success(),
+        stderr,
+    })
 }
 
 /// Build a failed result for a request that never reached the wire.
@@ -311,5 +391,46 @@ mod tests {
         let capped = truncate_capture(&text);
         assert_eq!(capped.chars().count(), MAX_CAPTURED_BODY_BYTES);
         assert_eq!(capped.len(), MAX_CAPTURED_BODY_BYTES);
+    }
+
+    /// A script's output is untrusted input, exactly like a response body.
+    /// `Command::output()` buffered it to EOF, so a script that printed without
+    /// bound exhausted host memory. Real `sh`, no mock.
+    #[tokio::test]
+    async fn a_runaway_script_cannot_grow_the_capture() {
+        let out = run_script_capped("head -c 200000 /dev/zero | tr '\\0' 'E' 1>&2; exit 1")
+            .await
+            .expect("script runs");
+
+        assert!(!out.success, "exit 1 must be reported as a failure");
+        assert_eq!(
+            out.stderr.len(),
+            MAX_CAPTURED_BODY_BYTES + TRUNCATION_MARKER.len(),
+            "stderr capture must be exactly the cap plus the truncation marker"
+        );
+        assert!(
+            out.stderr.ends_with(TRUNCATION_MARKER),
+            "a truncated capture must say so explicitly"
+        );
+    }
+
+    /// stdout is counted but never retained, because only its length is a
+    /// measurement. Retaining it is the bug this replaced.
+    #[tokio::test]
+    async fn stdout_is_counted_but_not_retained() {
+        let out = run_script_capped("head -c 5000 /dev/zero | tr '\\0' 'o'")
+            .await
+            .expect("script runs");
+
+        assert!(out.success, "exit 0 must be reported as a success");
+        assert_eq!(
+            out.stdout_bytes, 5_000,
+            "stdout bytes must be counted exactly"
+        );
+        assert!(
+            out.stderr.is_empty(),
+            "stderr must be empty for a clean script, got {} bytes",
+            out.stderr.len()
+        );
     }
 }

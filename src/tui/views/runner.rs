@@ -408,6 +408,8 @@ impl RunnerView {
             command: None,
             out_prefix: None,
             max_concurrency: 1000,
+            pool_max_idle_per_host: 64,
+            pool_idle_timeout_secs: 15,
         }
     }
 

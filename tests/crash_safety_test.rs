@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use rustress::core::constants::{
     ERROR_KEY_OVERFLOW_LABEL, MAX_CAPTURED_BODY_BYTES, MAX_DRAINED_BODY_BYTES,
-    MAX_TRACKED_ERROR_KEYS,
+    MAX_TRACKED_ERROR_KEYS, STATS_CHANNEL_CAPACITY,
 };
 use rustress::core::result::ExperimentResult;
 use rustress::runner::RunStats;
@@ -190,7 +190,7 @@ fn retention_ring_holds_capacity_under_100k_results() {
 fn error_key_space_is_capped_and_the_overflow_bucket_holds_the_remainder() {
     const UNIQUE_ERRORS: usize = 3_200;
 
-    let (tx, _rx) = mpsc::unbounded_channel();
+    let (tx, _rx) = mpsc::channel(STATS_CHANNEL_CAPACITY);
     let stats = Arc::new(RunStats::new(tx));
     for i in 0..UNIQUE_ERRORS {
         stats.record(transport_error(&format!("unique-error-{i}")));
@@ -226,7 +226,7 @@ fn error_key_space_is_capped_and_the_overflow_bucket_holds_the_remainder() {
 fn tracked_error_keys_keep_counting_after_the_budget_is_spent() {
     const TRACKED_FIRST: &str = "error-0";
 
-    let (tx, _rx) = mpsc::unbounded_channel();
+    let (tx, _rx) = mpsc::channel(STATS_CHANNEL_CAPACITY);
     let stats = Arc::new(RunStats::new(tx));
 
     for i in 0..(MAX_TRACKED_ERROR_KEYS + 10) {

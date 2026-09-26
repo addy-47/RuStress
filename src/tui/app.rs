@@ -3,8 +3,6 @@ use ratatui::layout::{Constraint, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
-use std::time::Duration;
-use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use super::EventLoop;
@@ -12,6 +10,7 @@ use super::TerminalGuard;
 use super::Theme;
 use crate::core::config::Config;
 use crate::core::snapshot::StatsSnapshot;
+use crate::runner::RunController;
 use crate::tui::views::helpers::vertical_chunks;
 use crate::tui::views::{DashboardView, RunnerView};
 
@@ -30,6 +29,9 @@ pub struct App {
     pub run_active: bool,
     pub draining: bool,
     pub cancel_token: Option<CancellationToken>,
+    /// Owns the actual load run. The dashboard used to render "RUNNING" with
+    /// no traffic behind it because the engine was constructed and dropped.
+    pub controller: RunController,
     pub width: u16,
     pub height: u16,
 }
@@ -54,6 +56,7 @@ impl App {
             run_active: false,
             draining: false,
             cancel_token: None,
+            controller: RunController::new(),
             width: 80,
             height: 24,
         }
@@ -105,14 +108,24 @@ impl App {
 
         match self.view {
             AppView::Runner => {
-                // Ctrl+R to start
+                // Ctrl+R starts a real run. The config comes from the runner
+                // form, so a bad value there is reported in the status line
+                // rather than taking the process down mid-render.
                 if let (KeyModifiers::CONTROL, KeyCode::Char('r')) = (key.modifiers, key.code) {
-                    self.run_active = true;
-                    self.draining = false;
-                    self.cancel_token = Some(CancellationToken::new());
-                    self.dash_view.status = "RUNNING".to_string();
-                    self.dash_view.start_time = std::time::Instant::now();
-                    self.view = AppView::Dashboard;
+                    match self.controller.start(self.runner_view.get_config()) {
+                        Ok(()) => {
+                            self.run_active = true;
+                            self.draining = false;
+                            self.cancel_token = Some(CancellationToken::new());
+                            self.dash_view.status = "RUNNING".to_string();
+                            self.dash_view.start_time = std::time::Instant::now();
+                            self.status_msg = None;
+                            self.view = AppView::Dashboard;
+                        }
+                        Err(errors) => {
+                            self.status_msg = Some(format!("cannot start: {}", errors.join("; ")));
+                        }
+                    }
                     return false;
                 }
                 // All other keys go to input handler
@@ -161,7 +174,11 @@ impl App {
             }
         }
 
-        if self.draining && self.dash_view.stats.inflight == 0 {
+        // FINISHED is decided by the run task completing, not by an in-flight
+        // count reaching zero. `inflight` is admitted at dispatch, so it can
+        // read 0 during a ramp before any request is admitted, which would
+        // report a finished run that has not started.
+        if self.draining && !self.controller.is_running() {
             self.run_active = false;
             self.draining = false;
             self.dash_view.status = String::from("FINISHED");
@@ -173,6 +190,7 @@ impl App {
         if let Some(cancel) = self.cancel_token.take() {
             cancel.cancel();
         }
+        self.controller.stop();
         self.draining = true;
         self.dash_view.status = String::from("DRAINING");
         self.status_msg = Some("Stopping...".to_string());
@@ -338,8 +356,7 @@ fn render_status_overlay(frame: &mut Frame<'_>, area: Rect, msg: &str, theme: &T
 
 pub async fn run_tui(
     cfg: Config,
-    stats_rx: mpsc::UnboundedReceiver<StatsSnapshot>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Option<std::sync::Arc<crate::runner::RunStats>>> {
     // The guard owns raw mode, the alternate screen, and mouse capture. It is
     // dropped on every exit path, including `?` returns and panics, so the host
     // terminal is never left unusable.
@@ -347,7 +364,10 @@ pub async fn run_tui(
     let mut terminal = guard.terminal()?;
 
     let mut app = App::new(cfg);
-    let mut events = EventLoop::new(stats_rx);
+    // The controller owns the run; the event loop only carries the frames it
+    // produces, so the two are polled independently and neither can block the
+    // other's progress.
+    let events = EventLoop::new();
 
     // Redraw only when state actually changed. The poll timeout bounds this
     // loop at ~100 Hz, and an unconditional full redraw at that rate competes
@@ -363,15 +383,15 @@ pub async fn run_tui(
             dirty = false;
         }
 
-        if crossterm::event::poll(Duration::from_millis(10))? {
-            match crossterm::event::read()? {
-                crossterm::event::Event::Key(key) => {
+        if events.has_input() {
+            match events.next_event() {
+                Some(crossterm::event::Event::Key(key)) => {
                     if app.handle_key(key) {
                         break;
                     }
                     dirty = true;
                 }
-                crossterm::event::Event::Mouse(mouse) => {
+                Some(crossterm::event::Event::Mouse(mouse)) => {
                     app.handle_mouse(mouse);
                     dirty = true;
                 }
@@ -379,7 +399,7 @@ pub async fn run_tui(
             }
         }
 
-        if let Some(snap) = events.poll(Duration::ZERO).await {
+        if let Some(snap) = app.controller.poll() {
             app.handle_stats(snap);
             dirty = true;
         }
@@ -389,6 +409,14 @@ pub async fn run_tui(
         cancel.cancel();
     }
 
+    // Cancel and wait for the drain barrier *before* the guard drops. A run
+    // task still in flight while the terminal is torn down would race the
+    // engine's own teardown, and the post-run summary needs the counters to
+    // have stopped moving.
+    app.controller.shutdown().await;
+
+    let stats = app.controller.stats().cloned();
+
     // Teardown happens in TerminalGuard::drop.
-    Ok(())
+    Ok(stats)
 }

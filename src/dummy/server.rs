@@ -20,16 +20,22 @@ impl DummyServer {
     /// reports none, so a caller that needs a known-free port — every
     /// integration test, and any CI runner running targets in parallel — would
     /// otherwise have to guess one and race for it.
+    /// Every route answers GET and POST.
+    ///
+    /// POST was added because a load generator's first question about any
+    /// target is what its *write* path does, and a GET-only fixture answers
+    /// that with a 405 -- which measures the method check rather than the
+    /// handler. The handlers ignore the method, so this is purely additive.
     pub fn router() -> Router {
         Router::new()
-            .route("/fast", get(handler_fast))
-            .route("/medium", get(handler_medium))
-            .route("/slow", get(handler_slow))
-            .route("/spike", get(handler_spike))
-            .route("/error", get(handler_error))
-            .route("/big", get(handler_big))
-            .route("/big-ok", get(handler_big_ok))
-            .route("/sized", get(handler_sized))
+            .route("/fast", get(handler_fast).post(handler_fast))
+            .route("/medium", get(handler_medium).post(handler_medium))
+            .route("/slow", get(handler_slow).post(handler_slow))
+            .route("/spike", get(handler_spike).post(handler_spike))
+            .route("/error", get(handler_error).post(handler_error))
+            .route("/big", get(handler_big).post(handler_big))
+            .route("/big-ok", get(handler_big_ok).post(handler_big_ok))
+            .route("/sized", get(handler_sized).post(handler_sized))
             .with_state(())
     }
 
