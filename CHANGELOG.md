@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.1.1]
 
+> Post-release note: `concurrency_memory_test` as tagged could not pass on a CI
+> runner. It measured peak memory from `VmHWM` and reset the watermark via
+> `/proc/self/clear_refs` while discarding the error; where that write is not
+> permitted the watermark never reset, so the second configuration's peak was
+> clamped to be at least the first's and the assertion compared a value with
+> itself. It passed three times locally and failed on the first CI run. Fixed on
+> `master` by sampling resident memory instead. The 0.1.1 crate itself is
+> unaffected — the defect is in the test's measurement, not the product.
+
 Memory, hot path, and the interactive dashboard.
 
 ### Fixed

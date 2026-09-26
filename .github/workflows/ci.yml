@@ -109,9 +109,23 @@ jobs:
             echo "::error::tag $TAG does not match Cargo.toml version $VER"
             exit 1
           fi
+      - name: Skip if this version is already on crates.io
+        # crates.io rejects a re-upload, and a version published from a
+        # workstation before the tag was pushed would otherwise turn this job
+        # red. Publishing is idempotent, not a tripwire.
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          CODE=$(curl -s -o /dev/null -w '%{http_code}' -A "rustress-ci" \
+            "https://crates.io/api/v1/crates/rustress/${TAG#v}")
+          if [ "$CODE" = "200" ]; then
+            echo "::notice::${TAG} is already published; nothing to do"
+            echo "ALREADY_PUBLISHED=1" >> "$GITHUB_ENV"
+          fi
       - name: Verify package contents
+        if: env.ALREADY_PUBLISHED != '1'
         run: cargo publish --dry-run
       - name: Publish
+        if: env.ALREADY_PUBLISHED != '1'
         run: cargo publish --token "$CARGO_REGISTRY_TOKEN"
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

@@ -35,36 +35,57 @@
 //! Zero mocks: every run goes through a real axum server over a real socket.
 //! ============================================================================
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use rustress::core::config::Config;
 use rustress::core::constants::{DEFAULT_MAX_CONCURRENCY, MAX_ALLOWED_CONCURRENCY};
 
 mod common;
 use common::dummy_server;
 
-/// Reset the kernel's peak-RSS watermark so each measurement stands alone.
-///
-/// `VmHWM` is monotonic for the life of the process. Without this reset the
-/// second run inherits the first run's peak and the comparison is meaningless.
-fn reset_peak_rss() {
-    let _ = std::fs::write("/proc/self/clear_refs", "5");
-}
-
-/// Peak resident set size since the last reset, in KB.
-///
-/// `VmHWM`, not `VmRSS`. A ceiling test wants the high-water mark: `VmRSS` is
-/// whatever the allocator happened to be holding at the instant of the read, so
-/// it is dominated by sampling noise. An earlier draft of this test used the
-/// current RSS and failed roughly half of full-suite runs while passing every
-/// solo run -- a flaky crash-safety test is worse than none.
-fn peak_rss_kb() -> Option<u64> {
+/// Current resident set size in bytes, or `None` off Linux.
+fn current_rss_bytes() -> Option<u64> {
     let status = std::fs::read_to_string("/proc/self/status").ok()?;
     for line in status.lines() {
-        if let Some(rest) = line.strip_prefix("VmHWM:") {
+        if let Some(rest) = line.strip_prefix("VmRSS:") {
             let kb: u64 = rest.split_whitespace().next()?.parse().ok()?;
-            return Some(kb);
+            return Some(kb * 1024);
         }
     }
     None
+}
+
+/// Sample resident memory until the returned handle is aborted, tracking the
+/// highest value seen.
+///
+/// Sampled rather than read from `VmHWM`, and deliberately so. `VmHWM` is the
+/// peak since process start, so measuring two configurations in one process with
+/// it means resetting the watermark through `/proc/self/clear_refs` -- which is
+/// not writable everywhere, and this test's first draft reset it while
+/// discarding the error. When the reset silently did nothing, the second
+/// configuration's high-water mark was clamped to be at least the first's, so
+/// the "higher ceiling costs more memory" assertion could not pass. It passed
+/// locally three times and failed on the first CI run, which is exactly how a
+/// false green announces itself.
+///
+/// Sampling has a real limitation: a spike between samples is missed. At 100 ms
+/// against multi-megabyte bodies that window is narrow, and the alternative --
+/// a metric that silently compares a value against itself -- is worse.
+fn spawn_rss_sampler() -> (tokio::task::JoinHandle<()>, Arc<AtomicU64>) {
+    let peak = Arc::new(AtomicU64::new(0));
+    let handle = {
+        let peak = Arc::clone(&peak);
+        tokio::spawn(async move {
+            loop {
+                if let Some(bytes) = current_rss_bytes() {
+                    peak.fetch_max(bytes, Ordering::Relaxed);
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        })
+    };
+    (handle, peak)
 }
 
 /// Run a short burst against the 8 MB route and report peak RSS in KB.
@@ -76,8 +97,7 @@ fn peak_rss_kb() -> Option<u64> {
 ///
 /// The ceilings used here are deliberately modest (4 and 64). This runs
 /// in-process against an 8 MB route, so a large ceiling briefly allocates
-/// gigabytes on a host that has already had its desktop session OOM-killed
-/// twice by this project. A bigger ratio would not prove more.
+/// gigabytes. A bigger ratio would not prove more.
 async fn peak_rss_kb_at(max_concurrency: u32, rps: u32, seconds: u64) -> Option<u64> {
     let server = dummy_server().await;
     let cfg: Config = Config {
@@ -92,22 +112,22 @@ async fn peak_rss_kb_at(max_concurrency: u32, rps: u32, seconds: u64) -> Option<
     cfg.validate().expect("config must be valid");
 
     let harness = common::Harness::new(cfg).expect("harness builds");
-    reset_peak_rss();
+    let (sampler, peak) = spawn_rss_sampler();
     harness.run().await;
+    sampler.abort();
     drop(server);
 
-    peak_rss_kb()
+    Some(peak.load(Ordering::Relaxed) / 1024)
 }
 
-#[ignore = "allocates hundreds of MB against an 8 MB route; this host has OOM-killed a desktop session. Run explicitly: cargo test --test concurrency_memory_test -- --ignored"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn peak_memory_tracks_the_in_flight_ceiling() {
     let low = peak_rss_kb_at(4, 400, 5)
         .await
-        .expect("/proc peak RSS must be readable");
+        .expect("the RSS sampler must produce a peak");
     let high = peak_rss_kb_at(64, 400, 5)
         .await
-        .expect("/proc peak RSS must be readable");
+        .expect("the RSS sampler must produce a peak");
 
     // A 16x higher ceiling must cost real memory. If it does not, the bound is
     // no longer being enforced and the tool would OOM on a large target.
