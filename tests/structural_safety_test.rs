@@ -174,21 +174,18 @@ fn the_production_crate_defines_no_mock_or_fake_types() {
                 }
             }
             for prefix in BANNED_PREFIXES {
-                if trimmed.starts_with("pub struct ")
+                if (trimmed.starts_with("pub struct ")
                     || trimmed.starts_with("struct ")
                     || trimmed.starts_with("pub trait ")
                     || trimmed.starts_with("trait ")
-                    || trimmed.starts_with("pub enum ")
-                {
-                    if let Some(name) = trimmed
+                    || trimmed.starts_with("pub enum "))
+                    && let Some(name) = trimmed
                         .split_whitespace()
                         .nth(2)
                         .map(|n| n.trim_start_matches("mut ").to_string())
-                    {
-                        if name.starts_with(prefix) {
-                            offences.push(format!("{file}:{}: {prefix}* type `{name}`", i + 1));
-                        }
-                    }
+                    && name.starts_with(prefix)
+                {
+                    offences.push(format!("{file}:{}: {prefix}* type `{name}`", i + 1));
                 }
             }
         }

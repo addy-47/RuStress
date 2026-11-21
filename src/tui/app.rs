@@ -28,7 +28,6 @@ pub struct App {
     pub status_msg: Option<String>,
     pub run_active: bool,
     pub draining: bool,
-    pub cancel_token: Option<CancellationToken>,
     /// Owns the actual load run. The dashboard used to render "RUNNING" with
     /// no traffic behind it because the engine was constructed and dropped.
     pub controller: RunController,
@@ -55,7 +54,6 @@ impl App {
             status_msg: None,
             run_active: false,
             draining: false,
-            cancel_token: None,
             controller: RunController::new(),
             width: 80,
             height: 24,
@@ -112,11 +110,17 @@ impl App {
                 // form, so a bad value there is reported in the status line
                 // rather than taking the process down mid-render.
                 if let (KeyModifiers::CONTROL, KeyCode::Char('r')) = (key.modifiers, key.code) {
-                    match self.controller.start(self.runner_view.get_config()) {
+                    let config = match self.runner_view.get_config() {
+                        Ok(cfg) => cfg,
+                        Err(errors) => {
+                            self.status_msg = Some(format!("cannot start: {}", errors.join("; ")));
+                            return false;
+                        }
+                    };
+                    match self.controller.start(config) {
                         Ok(()) => {
                             self.run_active = true;
                             self.draining = false;
-                            self.cancel_token = Some(CancellationToken::new());
                             self.dash_view.status = "RUNNING".to_string();
                             self.dash_view.start_time = std::time::Instant::now();
                             self.status_msg = None;
@@ -166,9 +170,7 @@ impl App {
             let elapsed = self.dash_view.start_time.elapsed();
             if elapsed >= self.dash_view.duration {
                 self.draining = true;
-                if let Some(cancel) = self.cancel_token.take() {
-                    cancel.cancel();
-                }
+                self.controller.stop();
                 self.dash_view.status = String::from("DRAINING");
                 self.status_msg = Some("Draining: waiting for in-flight requests...".to_string());
             }
@@ -187,9 +189,6 @@ impl App {
     }
 
     pub fn stop_run(&mut self) {
-        if let Some(cancel) = self.cancel_token.take() {
-            cancel.cancel();
-        }
         self.controller.stop();
         self.draining = true;
         self.dash_view.status = String::from("DRAINING");
@@ -367,24 +366,33 @@ pub async fn run_tui(
     // The controller owns the run; the event loop only carries the frames it
     // produces, so the two are polled independently and neither can block the
     // other's progress.
-    let events = EventLoop::new();
+    let event_cancel = CancellationToken::new();
+    let (mut event_rx, event_task) = EventLoop::new().spawn(event_cancel.clone());
 
-    // Redraw only when state actually changed. The poll timeout bounds this
-    // loop at ~100 Hz, and an unconditional full redraw at that rate competes
-    // with the load generator for the same cores. Snapshots arrive at 10 Hz, so
-    // this settles at 10 redraws per second.
+    // Redraw only when state actually changed. The await below bounds this loop
+    // at ~100 Hz, and an unconditional full redraw at that rate competes with
+    // the load generator for the same cores. Snapshots arrive at 10 Hz, so this
+    // settles at 10 redraws per second.
     let mut dirty = true;
+    // A broken pipe or resize error must not bypass the drain barrier below.
+    // Store the error, break, tear down, then return it.
+    let mut draw_error = None;
 
     loop {
         if dirty {
-            terminal.draw(|frame| {
+            if let Err(e) = terminal.draw(|frame| {
                 app.render(frame, frame.area());
-            })?;
+            }) {
+                draw_error = Some(e);
+                break;
+            }
             dirty = false;
         }
 
-        if events.has_input() {
-            match events.next_event() {
+        // The event source runs on a blocking thread, so this loop awaits
+        // every iteration. A single-thread runtime can still poll the engine.
+        tokio::select! {
+            maybe_event = event_rx.recv() => match maybe_event {
                 Some(crossterm::event::Event::Key(key)) => {
                     if app.handle_key(key) {
                         break;
@@ -395,8 +403,10 @@ pub async fn run_tui(
                     app.handle_mouse(mouse);
                     dirty = true;
                 }
-                _ => {}
-            }
+                Some(_) => {}
+                None => break,
+            },
+            _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
         }
 
         if let Some(snap) = app.controller.poll() {
@@ -405,9 +415,10 @@ pub async fn run_tui(
         }
     }
 
-    if let Some(cancel) = app.cancel_token.take() {
-        cancel.cancel();
-    }
+    // Stop the blocking input thread before the terminal is torn down, then
+    // drain the run. Both are bounded, so neither can wedge teardown.
+    event_cancel.cancel();
+    let _ = event_task.await;
 
     // Cancel and wait for the drain barrier *before* the guard drops. A run
     // task still in flight while the terminal is torn down would race the
@@ -418,5 +429,8 @@ pub async fn run_tui(
     let stats = app.controller.stats().cloned();
 
     // Teardown happens in TerminalGuard::drop.
-    Ok(stats)
+    match draw_error {
+        Some(e) => Err(e.into()),
+        None => Ok(stats),
+    }
 }

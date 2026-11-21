@@ -90,10 +90,10 @@ fn report_from_json(path: &str) -> anyhow::Result<()> {
     let mut error_counts = std::collections::HashMap::new();
     for r in &results {
         *status_codes.entry(r.status).or_insert(0) += 1;
-        if let Some(ref err) = r.error {
-            if !err.is_empty() {
-                *error_counts.entry(err.clone()).or_insert(0) += 1;
-            }
+        if let Some(ref err) = r.error
+            && !err.is_empty()
+        {
+            *error_counts.entry(err.clone()).or_insert(0) += 1;
         }
     }
 

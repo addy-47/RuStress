@@ -5,7 +5,7 @@ use std::time::Duration;
 /// Result of a single request execution.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExperimentResult {
-    /// Scheduled time for this request.
+    /// Time this request completed, in UTC.
     pub timestamp: DateTime<Utc>,
 
     /// Total latency from scheduled time to response completion.

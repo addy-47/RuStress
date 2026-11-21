@@ -1,10 +1,11 @@
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use reqwest::Response;
 use std::process::Stdio;
 
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
+use tokio_util::sync::CancellationToken;
 
 use crate::core::config::Config;
 use crate::core::constants::MAX_CAPTURED_BODY_BYTES;
@@ -36,6 +37,7 @@ pub async fn execute_http(
     ctx: &TemplateContext,
     scheduled: Instant,
     stats: &RunStats,
+    cancel: CancellationToken,
 ) {
     let actual_start = Instant::now();
     let queue_wait = actual_start.saturating_duration_since(scheduled);
@@ -55,14 +57,28 @@ pub async fn execute_http(
         }
     };
 
-    let outcome = match request.send().await {
-        Ok(response) => read_response(response).await,
-        Err(e) => HttpOutcome {
+    // Quit must not wait for a request timeout. On cancellation the request is
+    // recorded as a failed result — admitted work is always counted — and the
+    // InflightGuard releases the drain barrier immediately.
+    let exchange = async {
+        match request.send().await {
+            Ok(response) => read_response(response).await,
+            Err(e) => HttpOutcome {
+                status: 0,
+                bytes: 0,
+                captured_body: None,
+                error: Some(clean_error_msg(&e.to_string())),
+            },
+        }
+    };
+    let outcome = tokio::select! {
+        _ = cancel.cancelled() => HttpOutcome {
             status: 0,
             bytes: 0,
             captured_body: None,
-            error: Some(clean_error_msg(&e.to_string())),
+            error: Some("cancelled".to_string()),
         },
+        outcome = exchange => outcome,
     };
 
     // A 2xx status alone is not a success. If the body stream failed, the
@@ -152,32 +168,56 @@ pub async fn execute_script(
     ctx: &TemplateContext,
     scheduled: Instant,
     stats: &RunStats,
+    cancel: CancellationToken,
 ) {
     let actual_start = Instant::now();
     let queue_wait = actual_start.saturating_duration_since(scheduled);
 
     let raw = cfg.command.as_deref().unwrap_or_default();
+    // A render error must fail the request. Falling back to the raw text would
+    // hand an unrendered `{{ ... }}` string to `sh -c` and could run a command
+    // the user never asked for, with no error recorded.
     let command = if raw.contains("{{") {
-        engine
-            .execute_str(raw, ctx)
-            .unwrap_or_else(|_| raw.to_string())
+        match engine.execute_str(raw, ctx) {
+            Ok(rendered) => rendered,
+            Err(e) => {
+                record_script_failure(
+                    stats,
+                    actual_start,
+                    scheduled,
+                    ctx,
+                    format!("template render failed: {e}"),
+                );
+                return;
+            }
+        }
     } else {
         raw.to_string()
     };
 
-    let output = match run_script_capped(&command).await {
-        Ok(output) => output,
-        Err(e) => {
-            stats.record(failed_outcome(
-                actual_start,
-                scheduled,
-                ctx,
-                0,
-                e.to_string(),
-                Some("shell".to_string()),
-            ));
+    // A script has the same whole-request timeout as an HTTP exchange. Without
+    // it a `sleep infinity` child keeps the drain barrier — and the terminal —
+    // alive forever.
+    let timed = tokio::time::timeout(
+        Duration::from_secs(cfg.timeout_secs),
+        run_script_capped(&command),
+    );
+    let output = tokio::select! {
+        _ = cancel.cancelled() => {
+            record_script_failure(stats, actual_start, scheduled, ctx, "cancelled".to_string());
             return;
         }
+        result = timed => match result {
+            Ok(Ok(output)) => output,
+            Ok(Err(e)) => {
+                record_script_failure(stats, actual_start, scheduled, ctx, e.to_string());
+                return;
+            }
+            Err(_) => {
+                record_script_failure(stats, actual_start, scheduled, ctx, "script timed out".to_string());
+                return;
+            }
+        },
     };
 
     let success = output.success;
@@ -231,6 +271,9 @@ async fn run_script_capped(command: &str) -> std::io::Result<ScriptOutput> {
     let mut child = Command::new("sh")
         .arg("-c")
         .arg(command)
+        // Dropping the future on cancellation or timeout must kill the child,
+        // otherwise it survives as an orphan and keeps the pipe open.
+        .kill_on_drop(true)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -246,13 +289,17 @@ async fn run_script_capped(command: &str) -> std::io::Result<ScriptOutput> {
             match stdout.read(&mut buf).await {
                 Ok(0) => break,
                 Ok(n) => total += n as u64,
-                Err(_) => break,
+                Err(e) => {
+                    tracing::warn!("script stdout read failed: {e}");
+                    break;
+                }
             }
         }
         total
     });
 
     let mut retained: Vec<u8> = Vec::new();
+    let mut truncated = false;
     let mut stderr_buf = [0u8; 8 * 1024];
     loop {
         match stderr.read(&mut stderr_buf).await {
@@ -262,9 +309,17 @@ async fn run_script_capped(command: &str) -> std::io::Result<ScriptOutput> {
                     let room = MAX_CAPTURED_BODY_BYTES - retained.len();
                     let take = room.min(n);
                     retained.extend_from_slice(&stderr_buf[..take]);
+                    if take < n {
+                        truncated = true;
+                    }
+                } else {
+                    truncated = true;
                 }
             }
-            Err(_) => break,
+            Err(e) => {
+                tracing::warn!("script stderr read failed: {e}");
+                break;
+            }
         }
     }
 
@@ -272,7 +327,7 @@ async fn run_script_capped(command: &str) -> std::io::Result<ScriptOutput> {
     let status = child.wait().await?;
 
     let mut stderr = String::from_utf8_lossy(&retained).into_owned();
-    if retained.len() == MAX_CAPTURED_BODY_BYTES {
+    if truncated {
         stderr.push_str(TRUNCATION_MARKER);
     }
 
@@ -282,6 +337,24 @@ async fn run_script_capped(command: &str) -> std::io::Result<ScriptOutput> {
         success: status.success(),
         stderr,
     })
+}
+
+/// Record a script that failed before a usable exit status was produced.
+fn record_script_failure(
+    stats: &RunStats,
+    actual_start: Instant,
+    scheduled: Instant,
+    ctx: &TemplateContext,
+    reason: String,
+) {
+    stats.record(failed_outcome(
+        actual_start,
+        scheduled,
+        ctx,
+        0,
+        reason,
+        Some("shell".to_string()),
+    ));
 }
 
 /// Build a failed result for a request that never reached the wire.
@@ -317,10 +390,8 @@ fn truncate_capture(text: &str) -> String {
 fn clean_error_msg(message: &str) -> String {
     let interesting =
         message.contains("dial") || message.contains("timeout") || message.contains("connect");
-    if interesting {
-        if let Some(idx) = message.rfind(": ") {
-            return message[idx + 2..].to_string();
-        }
+    if interesting && let Some(idx) = message.rfind(": ") {
+        return message[idx + 2..].to_string();
     }
     message.to_string()
 }

@@ -122,3 +122,12 @@ impl RunController {
         self.stats.as_ref()
     }
 }
+
+impl Drop for RunController {
+    fn drop(&mut self) {
+        // A `?` or panic in the TUI loop must not detach a live load run: the
+        // engine task would keep hammering the target with no observer and no
+        // way to stop it. Cancelling here is idempotent with `shutdown`.
+        self.stop();
+    }
+}

@@ -82,13 +82,13 @@ impl StatsCollector {
             let mut codes = self.status_codes.lock();
             *codes.entry(status_code).or_insert(0) += 1;
 
-            if status_code >= 400 {
-                if let Some(body) = response_body {
-                    let mut samples = self.response_samples.lock();
-                    samples
-                        .entry(status_code)
-                        .or_insert_with(|| sample_of(body));
-                }
+            if status_code >= 400
+                && let Some(body) = response_body
+            {
+                let mut samples = self.response_samples.lock();
+                samples
+                    .entry(status_code)
+                    .or_insert_with(|| sample_of(body));
             }
         }
 

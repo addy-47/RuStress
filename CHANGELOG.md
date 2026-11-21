@@ -5,6 +5,45 @@ All notable changes to RuStress are recorded here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.2]
+
+Script-safe output, cookie support, and fixes from a full-repository review.
+
+### Added
+
+- `-q, --quiet` (alias `--no-progress`) suppresses the banner, configuration
+  preamble and progress bar in headless mode. The final summary and the
+  `MEASUREMENT INVALID` warning are never suppressed. The ANSI banner is also
+  suppressed automatically when stdout is not a TTY.
+- `--cookie "name=value; name2=value2"`, repeatable. Pairs are validated at the
+  CLI boundary (no CR/LF, no empty names or values) and merged into one
+  `Cookie` header, replacing any `Cookie` from `-H` or the config file.
+
+### Fixed
+
+- **Terminal safety:** a hanging script or a black-hole target could hold the
+  drain barrier — and the TUI's raw terminal — forever. Scripts now have a
+  whole-request timeout and `kill_on_drop`; in-flight requests observe
+  cancellation; the drain barrier has a grace backstop; `--timeout` has a 300s
+  ceiling; a draw error or controller drop no longer detaches a live run.
+- **Bounded memory:** the template file cache was an unbounded map keyed by a
+  path that can vary per request. It is capped at 256 files and 64 MB per file,
+  and file-template errors are reported instead of silently becoming empty.
+- **Measurement validity:** Users mode now publishes a final snapshot after
+  drain; a failed template render no longer runs the unrendered text as a shell
+  command; the histogram quantile contract states the required 0.0–1.0
+  fraction.
+- **Silent inputs:** malformed `-H` values and headers typed into the TUI form
+  are no longer dropped; invalid numeric fields in the form are reported
+  instead of replaced with defaults. Blocking crossterm reads now run on a
+  dedicated thread so the load task cannot be starved.
+- **Test falsifiability:** the render allocation ceiling was 4000 allocs/op
+  (a reintroduced per-request `Environment::new()` would still pass). It is now
+  32, measured from the fixed path, and CI evaluates the bench ceilings.
+- **Declared MSRV corrected from 1.85 to 1.88.** The committed lockfile already
+  contained transitive crates requiring 1.88, so the old value could not build
+  and the 1.85 CI leg could never pass. No dependency was changed.
+
 ## [0.1.1]
 
 > Post-release note: the memory assertion in `concurrency_memory_test` as

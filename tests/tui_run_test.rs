@@ -177,3 +177,41 @@ async fn a_second_start_is_refused_rather_than_silently_replacing_the_run() {
     controller.stop();
     controller.shutdown().await;
 }
+
+/// Dropping a controller without `shutdown` still cancels its run.
+///
+/// A draw error or panic in the TUI loop unwinds past the normal shutdown call.
+/// Without a `Drop` impl the engine task is detached and keeps generating load
+/// with no observer and no way to stop it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dropping_the_controller_cancels_an_in_flight_run() {
+    let server = dummy_server().await;
+    let cfg = Config {
+        url: server.url("/fast"),
+        target_rps: 100,
+        steady_dur_secs: 600,
+        ..Config::default()
+    };
+
+    let mut controller = RunController::new();
+    controller.start(cfg).expect("run starts");
+    let stats = controller.stats().cloned().expect("stats handle");
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while stats.snapshot().requests == 0 && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(stats.snapshot().requests > 0, "the run must have started");
+
+    drop(controller);
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let at_drop = stats.snapshot().requests;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let later = stats.snapshot().requests;
+
+    assert_eq!(
+        later, at_drop,
+        "the detached run kept generating traffic after the controller was dropped"
+    );
+}

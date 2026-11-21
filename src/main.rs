@@ -15,12 +15,13 @@ async fn main() -> Result<()> {
             commands::report::run(&input)?;
         }
         None => {
+            let quiet = cli.quiet;
             let cfg = cli.into_config();
 
             if cfg.url.is_empty() && cfg.command.is_none() {
                 commands::tui_mode::run_tui(cfg).await?;
             } else {
-                commands::headless::run_headless(cfg).await?;
+                commands::headless::run_headless(cfg, quiet).await?;
             }
         }
     }

@@ -105,8 +105,21 @@ RuStress provides a robust CLI interface for headless execution and scripting.
 | `--ramp-down`| Cool-down | Time in seconds to linearly decrease load before stopping. |
 | `--timeout` | Timeout | Max time to wait for a single request response (default: 30s). |
 | `-H, --header` | Header | Custom header string (`"Key: Value"`). Can be repeated. |
+| `--cookie` | Cookie header | `name=value` pairs separated by `;`. Repeatable; replaces any `Cookie` header from `-H` or the config file. |
+| `-q, --quiet` | Quiet output | Alias `--no-progress`. Suppresses the banner, preamble and progress bar. The final summary and the measurement-invalid warning are always printed. |
+| `--max-concurrency` | Peak in-flight | Maximum concurrent requests. Lower it to cap memory on large response bodies. |
+| `--pool-max-idle-per-host` | Idle sockets | Maximum connections retained per host. Lower it to cap resident memory. |
+| `--pool-idle-timeout` | Idle lifetime | Seconds an unused connection is kept warm. |
 | `--config` | Config File | Path to a TOML file containing all test parameters. |
 | `--out` | Report Name | Prefix for the generated `.csv` and `.json` report files. |
+
+For scripts and CI, `--quiet` keeps logs free of ANSI escapes. Authenticated runs
+can supply cookies without manual `-H` headers:
+
+```bash
+rustress -u https://api.example.com/me -r 50 -d 30 --quiet \
+  --cookie "session=abc123; theme=dark" --cookie "csrf=xyz"
+```
 
 ### Subcommands
 

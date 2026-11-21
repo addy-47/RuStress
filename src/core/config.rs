@@ -6,7 +6,8 @@ use crate::core::constants::{
     DEFAULT_DURATION_SECS, DEFAULT_MAX_CONCURRENCY, DEFAULT_METHOD, DEFAULT_NUM_USERS,
     DEFAULT_POOL_IDLE_TIMEOUT_SECS, DEFAULT_POOL_MAX_IDLE_PER_HOST, DEFAULT_TARGET_RPS,
     DEFAULT_TIMEOUT_SECS, MAX_ALLOWED_CONCURRENCY, MAX_ALLOWED_RPS, MAX_ALLOWED_USERS,
-    MAX_IDLE_CONNS_PER_HOST, MAX_POOL_IDLE_TIMEOUT_SECS, MIN_ALLOWED_CONCURRENCY,
+    MAX_IDLE_CONNS_PER_HOST, MAX_POOL_IDLE_TIMEOUT_SECS, MAX_REQUEST_TIMEOUT_SECS,
+    MIN_ALLOWED_CONCURRENCY,
 };
 
 /// Load generation mode.
@@ -195,6 +196,11 @@ impl Config {
 
         if self.timeout_secs == 0 {
             errors.push("timeout_secs must be greater than 0".into());
+        } else if self.timeout_secs > MAX_REQUEST_TIMEOUT_SECS {
+            errors.push(format!(
+                "timeout_secs must be at most {MAX_REQUEST_TIMEOUT_SECS} (got {})",
+                self.timeout_secs
+            ));
         }
 
         if self.url.is_empty() && self.command.is_none() {
@@ -403,7 +409,7 @@ mod tests {
 
     #[test]
     fn one_past_each_documented_maximum_is_rejected() {
-        let cases: [(&str, Config); 3] = [
+        let cases: [(&str, Config); 4] = [
             (
                 "target_rps",
                 Config {
@@ -427,6 +433,15 @@ mod tests {
                 Config {
                     url: "http://localhost:8080".into(),
                     max_concurrency: MAX_ALLOWED_CONCURRENCY + 1,
+                    steady_dur_secs: 1,
+                    ..Default::default()
+                },
+            ),
+            (
+                "timeout_secs",
+                Config {
+                    url: "http://localhost:8080".into(),
+                    timeout_secs: MAX_REQUEST_TIMEOUT_SECS + 1,
                     steady_dur_secs: 1,
                     ..Default::default()
                 },

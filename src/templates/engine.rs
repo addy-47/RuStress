@@ -32,7 +32,6 @@ pub type ParsedTemplate = Arc<String>;
 /// - `{{ random_int(min, max) }}` — random integer in range [min, max)
 /// - `{{ uuid() }}` — generates a new UUID v4
 /// - `{{ user_id }}` — the current user ID, provided as a context variable
-/// - `{{ request_uuid() }}` — returns the current request UUID
 /// - `{{ random_choice(a, b, c) }}` — picks one value randomly
 /// - `{{ random_line(path) }}` — picks a random line from a file
 /// - `{{ read_file(path) }}` — reads entire file content
@@ -187,20 +186,25 @@ impl TemplateEngine {
         });
 
         let fc1 = Arc::clone(&file_cache);
-        env.add_function("random_line", move |path: String| -> String {
-            match fc1.get_lines(&path) {
-                Ok(lines) if !lines.is_empty() => {
-                    let idx = rand::thread_rng().gen_range(0..lines.len());
-                    lines[idx].clone()
+        env.add_function(
+            "random_line",
+            move |path: String| -> Result<String, minijinja::Error> {
+                let lines = fc1.get_lines(&path).map_err(template_file_error)?;
+                if lines.is_empty() {
+                    return Ok(String::new());
                 }
-                _ => String::new(),
-            }
-        });
+                let idx = rand::thread_rng().gen_range(0..lines.len());
+                Ok(lines[idx].clone())
+            },
+        );
 
         let fc2 = Arc::clone(&file_cache);
-        env.add_function("read_file", move |path: String| -> String {
-            fc2.get_raw(&path).unwrap_or_default()
-        });
+        env.add_function(
+            "read_file",
+            move |path: String| -> Result<String, minijinja::Error> {
+                fc2.get_raw(&path).map_err(template_file_error)
+            },
+        );
 
         // printf-style formatting using minijinja's built-in format filter
         // (not needed as a custom function — minijinja supports {{ "%s"|format(val) }})
@@ -223,5 +227,50 @@ impl TemplateEngine {
 impl Default for TemplateEngine {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Surface a file-cache failure as a template error, not an empty string.
+///
+/// Swallowing it would send a body missing its data while the run reports a
+/// clean result — the silent-fallback class the style guide forbids.
+fn template_file_error(err: anyhow::Error) -> minijinja::Error {
+    minijinja::Error::new(minijinja::ErrorKind::InvalidOperation, err.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn repeated_renders_do_not_recompile_the_template() {
+        let engine = TemplateEngine::new();
+        let ctx = TemplateContext::new("user-1".to_string());
+        engine
+            .execute_str("{{ user_id }}", &ctx)
+            .expect("first render");
+        let compiled = engine.compiled_template_count();
+        for _ in 0..100 {
+            engine
+                .execute_str("{{ user_id }}", &ctx)
+                .expect("cached render");
+        }
+        assert_eq!(
+            engine.compiled_template_count(),
+            compiled,
+            "a repeated render must reuse the compiled template"
+        );
+    }
+
+    #[test]
+    fn a_missing_template_file_is_an_error_not_an_empty_body() {
+        let engine = TemplateEngine::new();
+        let ctx = TemplateContext::new("user-1".to_string());
+        assert!(
+            engine
+                .execute_str("{{ read_file('/does/not/exist') }}", &ctx)
+                .is_err(),
+            "a missing file must fail the request visibly"
+        );
     }
 }

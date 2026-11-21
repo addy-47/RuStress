@@ -1,8 +1,10 @@
+use indexmap::IndexMap;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
+use reqwest::header::HeaderName;
 use tui_input::Input;
 use tui_input::backend::crossterm::EventHandler;
 
@@ -131,6 +133,56 @@ fn visible_fields(load_mode: &str) -> Vec<FormField> {
     .collect()
 }
 
+/// Render existing headers back into the form so they can be edited, not lost.
+fn format_headers(headers: &IndexMap<String, String>) -> String {
+    headers
+        .iter()
+        .map(|(name, value)| format!("{name}: {value}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Parse one `Key: Value` per line into a header map.
+///
+/// A malformed line is an error: silently skipping it would send an
+/// unauthenticated request while the dashboard shows the header on screen.
+fn parse_headers(raw: &str) -> Result<IndexMap<String, String>, Vec<String>> {
+    let mut headers = IndexMap::new();
+    let mut errors = Vec::new();
+    for line in raw.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        let Some((name, value)) = line.split_once(':') else {
+            errors.push(format!("header '{line}' must be 'Key: Value'"));
+            continue;
+        };
+        let name = name.trim();
+        if HeaderName::from_bytes(name.as_bytes()).is_err() {
+            errors.push(format!("invalid header name '{name}'"));
+            continue;
+        }
+        headers.insert(name.to_string(), value.trim().to_string());
+    }
+    if errors.is_empty() {
+        Ok(headers)
+    } else {
+        Err(errors)
+    }
+}
+
+/// Parse one numeric field, accumulating a reason instead of coercing to a default.
+fn parse_field<T: std::str::FromStr>(
+    label: &str,
+    raw: &str,
+    errors: &mut Vec<String>,
+) -> Option<T> {
+    match raw.parse::<T>() {
+        Ok(value) => Some(value),
+        Err(_) => {
+            errors.push(format!("{label} must be a positive integer"));
+            None
+        }
+    }
+}
+
 /// Runner configuration form view with editable inputs.
 pub struct RunnerView {
     pub inputs: Vec<(FormField, Input)>,
@@ -151,7 +203,10 @@ impl RunnerView {
         let inputs = vec![
             (FormField::Url, Input::new(initial.url)),
             (FormField::Method, Input::new(initial.method)),
-            (FormField::Headers, Input::default()),
+            (
+                FormField::Headers,
+                Input::new(format_headers(&initial.headers)),
+            ),
             (
                 FormField::Body,
                 Input::new(initial.body.unwrap_or_default()),
@@ -349,42 +404,62 @@ impl RunnerView {
         }
     }
 
-    pub fn get_config(&self) -> Config {
+    /// Resolve the form into a `Config`, or report every bad field.
+    ///
+    /// No value is silently replaced with a default: a run must never execute
+    /// against numbers the operator did not enter.
+    pub fn get_config(&self) -> Result<Config, Vec<String>> {
         let url = self.inputs[0].1.value().to_string();
         let method = self.inputs[1].1.value().to_string();
+        let headers_raw = self.inputs[2].1.value();
         let body_raw = self.inputs[3].1.value().to_string();
-        let body = if body_raw.is_empty() {
-            None
-        } else {
-            Some(body_raw)
+        let body = (!body_raw.is_empty()).then_some(body_raw);
+        let target_raw = self.inputs[5].1.value();
+        let duration_raw = self.inputs[6].1.value();
+        let ramp_up_raw = self.inputs[7].1.value();
+        let ramp_down_raw = self.inputs[8].1.value();
+        let think_time_raw = self.inputs[9].1.value();
+
+        let mut errors: Vec<String> = self.errors.values().cloned().collect();
+        let headers = match parse_headers(headers_raw) {
+            Ok(headers) => headers,
+            Err(mut reasons) => {
+                errors.append(&mut reasons);
+                IndexMap::new()
+            }
         };
-        let load_mode = &self.load_mode;
-        let target_str = self.inputs[5].1.value();
-        let duration_str = self.inputs[6].1.value();
-        let ramp_up_str = self.inputs[7].1.value();
-        let ramp_down_str = self.inputs[8].1.value();
-        let think_time_str = self.inputs[9].1.value();
+        let target = match parse_field("Target", target_raw, &mut errors) {
+            Some(value) => value,
+            None => return Err(errors),
+        };
+        let duration = match parse_field("Duration", duration_raw, &mut errors) {
+            Some(value) => value,
+            None => return Err(errors),
+        };
+        let ramp_up = match parse_field("Ramp Up", ramp_up_raw, &mut errors) {
+            Some(value) => value,
+            None => return Err(errors),
+        };
+        let ramp_down = match parse_field("Ramp Down", ramp_down_raw, &mut errors) {
+            Some(value) => value,
+            None => return Err(errors),
+        };
+        let think_time = match parse_field("Think Time", think_time_raw, &mut errors) {
+            Some(value) => value,
+            None => return Err(errors),
+        };
+        if !errors.is_empty() {
+            return Err(errors);
+        }
 
-        let target = target_str
-            .parse()
-            .unwrap_or(if load_mode == "rps" { 100 } else { 10 });
-        let duration = duration_str.parse().unwrap_or(30);
-        let ramp_up = ramp_up_str.parse().unwrap_or(0);
-        let ramp_down = ramp_down_str.parse().unwrap_or(0);
-        let think_time = think_time_str.parse().unwrap_or(0);
-
-        let mode = if load_mode == "users" {
+        let mode = if self.load_mode == "users" {
             Mode::Users
         } else {
             Mode::Rps
         };
-        let num_users = if matches!(mode, Mode::Users) {
-            target
-        } else {
-            10
-        };
+        let num_users = if mode == Mode::Users { target } else { 10 };
 
-        Config {
+        Ok(Config {
             url,
             method: if method.is_empty() {
                 "GET".to_string()
@@ -392,12 +467,8 @@ impl RunnerView {
                 method
             },
             body,
-            headers: Default::default(),
-            target_rps: if matches!(mode, Mode::Rps) {
-                target
-            } else {
-                100
-            },
+            headers,
+            target_rps: if mode == Mode::Rps { target } else { 100 },
             steady_dur_secs: duration,
             ramp_up_secs: ramp_up,
             ramp_down_secs: ramp_down,
@@ -410,7 +481,7 @@ impl RunnerView {
             max_concurrency: 1000,
             pool_max_idle_per_host: 64,
             pool_idle_timeout_secs: 15,
-        }
+        })
     }
 
     pub fn render(&mut self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
@@ -611,5 +682,53 @@ impl RunnerView {
 
             frame.render_widget(help_panel, footer_split[1]);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn headers_typed_into_the_form_reach_the_config() {
+        let mut view = RunnerView::new(Config::default());
+        view.inputs[2].1 = Input::new("Authorization: Bearer abc\nX-Trace: 42".to_string());
+        let cfg = view.get_config().expect("valid form");
+        assert_eq!(
+            cfg.headers.get("Authorization").map(String::as_str),
+            Some("Bearer abc")
+        );
+        assert_eq!(cfg.headers.get("X-Trace").map(String::as_str), Some("42"));
+    }
+
+    #[test]
+    fn config_file_headers_are_shown_in_the_form() {
+        let mut initial = Config::default();
+        initial
+            .headers
+            .insert("Authorization".into(), "Bearer abc".into());
+        let view = RunnerView::new(initial);
+        assert_eq!(view.inputs[2].1.value(), "Authorization: Bearer abc");
+    }
+
+    #[test]
+    fn a_malformed_header_is_reported_instead_of_dropped() {
+        let mut view = RunnerView::new(Config::default());
+        view.inputs[2].1 = Input::new("Authorization".to_string());
+        let errors = view
+            .get_config()
+            .expect_err("a header without ':' must fail");
+        assert!(
+            errors.iter().any(|e| e.contains("Authorization")),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn an_invalid_number_is_reported_instead_of_coerced() {
+        let mut view = RunnerView::new(Config::default());
+        view.inputs[6].1 = Input::new("abc".to_string());
+        let errors = view.get_config().expect_err("a bad duration must fail");
+        assert!(errors.iter().any(|e| e.contains("Duration")), "{errors:?}");
     }
 }

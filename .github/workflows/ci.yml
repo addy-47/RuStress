@@ -21,7 +21,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        rust: [stable, 1.85]
+        rust: [stable, 1.88]
     steps:
       - uses: actions/checkout@v4
       - name: Install toolchain
@@ -62,6 +62,11 @@ jobs:
         run: cargo build --release
       - name: Docs build warning-free
         run: cargo doc --no-deps
+      # The bench targets are `harness = false`, so `cargo test --all-targets`
+      # only checks that they decline to run in debug. This is the only CI step
+      # that evaluates their allocation ceilings.
+      - name: Hot-path allocation ceilings
+        run: cargo bench --bench hot_path_bench
 
   # The memory-bound tests allocate hundreds of MB against an 8 MB route. They
   # are `#[ignore]`d so that an ordinary `cargo test` on a developer machine is

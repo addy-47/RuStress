@@ -29,8 +29,8 @@ use std::path::Path;
 use rustress::cli::args::Cli;
 use rustress::core::config::{Config, Mode};
 use rustress::core::constants::{
-    MAX_ALLOWED_CONCURRENCY, MAX_ALLOWED_RPS, MAX_ALLOWED_USERS, MIN_ALLOWED_CONCURRENCY,
-    STATS_CHANNEL_CAPACITY,
+    MAX_ALLOWED_CONCURRENCY, MAX_ALLOWED_RPS, MAX_ALLOWED_USERS, MAX_REQUEST_TIMEOUT_SECS,
+    MIN_ALLOWED_CONCURRENCY, STATS_CHANNEL_CAPACITY,
 };
 use rustress::runner::LoadEngine;
 use tokio::sync::mpsc;
@@ -339,6 +339,80 @@ fn command_line_headers_reach_the_resolved_config() {
         Some("spaced"),
         "header values must be trimmed on both sides"
     );
+}
+
+/// `--cookie` pairs, including multiple pairs in one argument, become one
+/// canonical Cookie header in the order the user wrote them.
+#[test]
+fn cookie_arguments_reach_the_resolved_config_in_order() {
+    let cli = Cli::parse_from([
+        "rustress",
+        "-u",
+        "http://127.0.0.1:9/x",
+        "--cookie",
+        "sid=abc; theme=dark",
+        "--cookie",
+        "csrf=abc==",
+    ]);
+    let cfg = cli.into_config();
+    assert_eq!(
+        cfg.headers.get("Cookie").map(String::as_str),
+        Some("sid=abc; theme=dark; csrf=abc=="),
+        "base64 padding must survive parsing and pair order is significant"
+    );
+}
+
+/// A Cookie supplied by -H is replaced, not duplicated, by --cookie.
+#[test]
+fn an_explicit_cookie_replaces_every_case_variant_of_a_cookie_header() {
+    let cli = Cli::parse_from([
+        "rustress",
+        "-u",
+        "http://127.0.0.1:9/x",
+        "-H",
+        "cookie: old=1",
+        "--cookie",
+        "new=2",
+    ]);
+    let cfg = cli.into_config();
+    let cookie_keys: Vec<_> = cfg
+        .headers
+        .keys()
+        .filter(|name| name.eq_ignore_ascii_case("cookie"))
+        .collect();
+    assert_eq!(cookie_keys, vec!["Cookie"], "exactly one Cookie header");
+    assert_eq!(cfg.headers["Cookie"], "new=2");
+}
+
+/// An unbounded timeout would let a black-hole target hold the TUI in raw mode.
+#[test]
+fn a_timeout_above_the_ceiling_is_rejected_at_construction() {
+    let mut cfg = cfg_for("http://127.0.0.1:9/x");
+    cfg.timeout_secs = MAX_REQUEST_TIMEOUT_SECS + 1;
+    let reason = rejection_reason(cfg);
+    assert!(
+        reason.contains("timeout_secs"),
+        "the reason must name the field: {reason}"
+    );
+}
+
+/// A header with no colon used to be dropped without a diagnostic.
+#[test]
+fn a_header_without_a_colon_reaches_the_config_instead_of_vanishing() {
+    let cli = Cli::parse_from(["rustress", "-u", "http://127.0.0.1:9/x", "-H", "X-Bare"]);
+    let cfg = cli.into_config();
+    assert_eq!(cfg.headers.get("X-Bare").map(String::as_str), Some(""));
+}
+
+/// Both spellings of the quiet flag are accepted.
+#[test]
+fn quiet_and_no_progress_are_the_same_flag() {
+    for flag in ["--quiet", "-q", "--no-progress"] {
+        let cli = Cli::parse_from(["rustress", "-u", "http://127.0.0.1:9/x", flag]);
+        assert!(cli.quiet, "{flag} must enable quiet mode");
+    }
+    let cli = Cli::parse_from(["rustress", "-u", "http://127.0.0.1:9/x"]);
+    assert!(!cli.quiet, "quiet is opt-in");
 }
 
 /// Write a load profile to a real file in `dir` and return its path.

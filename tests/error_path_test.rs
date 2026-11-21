@@ -15,13 +15,10 @@
 //! path exercised is the real one: a real `reqwest` request, a real truncated
 //! body, real accounting.
 //!
-//! # Known failing test
-//!
-//! `a_truncated_response_is_counted_as_a_failure_not_a_success` fails against
-//! current `main`. It is a reported production defect at
-//! `src/runner/executor.rs:62` — see the test's own documentation. It is left
-//! red deliberately: weakening it would hide the defect, and this role does not
-//! fix production code.
+//! `a_truncated_response_is_counted_as_a_failure_not_a_success` is a passing
+//! regression guard. A `200` whose body stream fails is recorded as a failure;
+//! earlier code derived success from the status code alone and reported 100%
+//! success against targets returning unusable responses.
 
 mod common;
 
@@ -87,23 +84,13 @@ async fn run_against(url: &str) -> rustress::core::snapshot::StatsSnapshot {
 
 /// A body that stops mid-transfer is a failed request, not a success.
 ///
-/// **This test currently fails. It is a reported production defect, not a flaky
-/// test.** `runner/executor.rs:62` derives `success` from the status code
-/// alone:
+/// The executor used to derive `success` from the status code alone and discard
+/// `outcome.error`. A `200` whose body failed mid-transfer was recorded as a
+/// success while its error message went to `error_counts`, so a run could report
+/// 100% success against a target returning unusable responses.
 ///
-/// ```text
-/// let success = (200..300).contains(&outcome.status);
-/// ```
-///
-/// `outcome.error` is discarded. A `200` whose body errors mid-transfer is
-/// therefore recorded as a success while its error message is filed under
-/// `error_counts`, so a run can report 100% success against a target that is
-/// returning unusable responses and no counter disagrees.
-///
-/// Do not weaken the assertions below to make this pass. Fix the executor.
-///
-/// Catches an executor that derives `success` from the status code alone. The
-/// status was a perfectly good `200`; the response never finished arriving.
+/// Do not weaken these assertions. They are the guard for that regression. The
+/// status here is a perfectly good `200`; the response never finished arriving.
 #[tokio::test]
 async fn a_truncated_response_is_counted_as_a_failure_not_a_success() {
     // 200 OK, promise 100 bytes, deliver 10, then close.

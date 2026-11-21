@@ -33,6 +33,20 @@ pub const RESULT_RING_CAPACITY: usize = 50_000;
 /// Maximum distinct error message keys tracked before folding into a bucket.
 pub const MAX_TRACKED_ERROR_KEYS: usize = 64;
 
+/// Maximum distinct files held in the template file cache.
+///
+/// A template may build a path from a per-request UUID. Without a ceiling the
+/// cache grows by one entry per request — the same unbounded-map failure the
+/// error-key budget prevents. 256 covers ordinary token/body files while
+/// keeping the worst case at a few megabytes.
+pub const MAX_CACHED_TEMPLATE_FILES: usize = 256;
+
+/// Largest file the template cache will read into memory.
+///
+/// `read_file` and `@file` bodies read target- or user-supplied paths. A large
+/// file would otherwise be materialised in full once per distinct path.
+pub const MAX_TEMPLATE_FILE_BYTES: u64 = 64 * 1024 * 1024;
+
 /// Label used for error keys beyond `MAX_TRACKED_ERROR_KEYS`.
 pub const ERROR_KEY_OVERFLOW_LABEL: &str = "(other)";
 
@@ -70,6 +84,22 @@ pub const DEFAULT_TARGET_RPS: u32 = 100;
 
 /// Default number of virtual users.
 pub const DEFAULT_NUM_USERS: u32 = 10;
+
+/// Longest accepted whole-request timeout, in seconds.
+///
+/// Requests are awaited by the drain barrier, which runs before the TUI tears
+/// down the terminal. An unbounded timeout therefore turns a black-hole target
+/// into an unbounded raw-mode session — the terminal failure this project
+/// exists to prevent. 300s is long enough for a slow target and short enough
+/// that quitting a run cannot hang indefinitely.
+pub const MAX_REQUEST_TIMEOUT_SECS: u64 = 300;
+
+/// Grace period after cancellation before the drain barrier stops waiting.
+///
+/// Requests are cancellation-aware, so this is a backstop, not the normal
+/// exit: it bounds the wait if a future execution path is not. Teardown must
+/// never depend on a task that can run forever.
+pub const DRAIN_GRACE_SECS: u64 = 30;
 
 /// Default think time in milliseconds.
 pub const DEFAULT_THINK_TIME_MS: u64 = 1000;

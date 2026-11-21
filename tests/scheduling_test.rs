@@ -24,6 +24,8 @@ use axum::Router;
 use axum::routing::get;
 use tokio::time::sleep;
 
+use rustress::core::config::{Config, Mode};
+
 use common::{Harness, TestServer, cfg_for, serve};
 
 /// Latency of the deliberately slow fixture. Bounded so a drain can never be
@@ -299,5 +301,42 @@ async fn cancellation_before_the_first_tick_terminates_immediately() {
         harness.snapshot().dropped_scheduled,
         0,
         "nothing was scheduled, so nothing can have been shed"
+    );
+}
+
+/// Closed-loop mode ends on a frame that contains the final counters.
+///
+/// The stats ticker stops on cancellation, which happens before Users-mode
+/// handles finish. Without a final frame after the join, a dashboard consumer
+/// can end the run displaying fewer requests than actually completed.
+#[tokio::test]
+async fn users_mode_publishes_a_final_frame_after_drain() {
+    let server = latency_server().await;
+    let cfg = Config {
+        url: server.url("/stalled"),
+        mode: Mode::Users,
+        num_users: 4,
+        target_rps: 20,
+        steady_dur_secs: 1,
+        timeout_secs: 5,
+        ..Default::default()
+    };
+    let mut harness = Harness::new(cfg).expect("engine");
+
+    harness.run().await;
+
+    let counters = harness.snapshot();
+    let mut latest = rustress::StatsSnapshot::default();
+    while let Ok(frame) = harness.updates.try_recv() {
+        latest = frame;
+    }
+
+    assert!(
+        counters.requests > 0,
+        "the users must have executed requests"
+    );
+    assert_eq!(
+        latest.requests, counters.requests,
+        "the last frame must not undercount a completed Users-mode run"
     );
 }

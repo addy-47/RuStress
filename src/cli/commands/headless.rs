@@ -3,31 +3,42 @@ use crate::core::constants::{PROGRESS_UPDATE_INTERVAL_MS, STATS_CHANNEL_CAPACITY
 use crate::core::snapshot::StatsSnapshot;
 use crate::runner::LoadEngine;
 use indicatif::{ProgressBar, ProgressStyle};
+use std::io::IsTerminal;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-/// Run in headless (non-TUI) mode with text progress bar.
-pub async fn run_headless(cfg: Config) -> anyhow::Result<()> {
-    // Print banner
-    println!("{}", crate::tui::banner());
-    println!("  URL:          {}", cfg.url);
-    println!("  Method:       {}", cfg.method);
-    println!("  Mode:         {:?}", cfg.mode);
-    if cfg.mode == crate::core::config::Mode::Rps {
-        println!("  Target RPS:   {}", cfg.target_rps);
-    } else {
-        println!("  Users:        {}", cfg.num_users);
+/// Run in headless (non-TUI) mode.
+///
+/// `quiet` suppresses the banner, preamble and progress bar. It never gates
+/// the final summary: the counters and the measurement-validity warning are
+/// results, not progress, and must reach a script's log.
+pub async fn run_headless(cfg: Config, quiet: bool) -> anyhow::Result<()> {
+    // The banner carries ANSI colour codes. Piping stdout into a log is a
+    // non-TTY, so it is suppressed there even without --quiet. The preamble
+    // is plain text and is removed only by --quiet.
+    if !quiet && std::io::stdout().is_terminal() {
+        println!("{}", crate::tui::banner());
     }
-    println!("  Duration:     {}s", cfg.steady_dur_secs);
-    if cfg.ramp_up_secs > 0 {
-        println!("  Ramp Up:      {}s", cfg.ramp_up_secs);
+    if !quiet {
+        println!("  URL:          {}", cfg.url);
+        println!("  Method:       {}", cfg.method);
+        println!("  Mode:         {:?}", cfg.mode);
+        if cfg.mode == crate::core::config::Mode::Rps {
+            println!("  Target RPS:   {}", cfg.target_rps);
+        } else {
+            println!("  Users:        {}", cfg.num_users);
+        }
+        println!("  Duration:     {}s", cfg.steady_dur_secs);
+        if cfg.ramp_up_secs > 0 {
+            println!("  Ramp Up:      {}s", cfg.ramp_up_secs);
+        }
+        if cfg.ramp_down_secs > 0 {
+            println!("  Ramp Down:    {}s", cfg.ramp_down_secs);
+        }
+        println!();
     }
-    if cfg.ramp_down_secs > 0 {
-        println!("  Ramp Down:    {}s", cfg.ramp_down_secs);
-    }
-    println!();
 
     let (tx, rx) = mpsc::channel(STATS_CHANNEL_CAPACITY);
     let engine = LoadEngine::new(cfg.clone(), tx)?;
@@ -44,14 +55,20 @@ pub async fn run_headless(cfg: Config) -> anyhow::Result<()> {
     let total_dur = cfg.total_duration();
     let start = Instant::now();
 
-    // Progress bar
-    let pb = ProgressBar::new(100);
-    pb.set_style(
-        ProgressStyle::default_bar()
-            .template("{spinner:.green} [{bar:40.cyan/blue}] {pos:>3}% {msg}")
-            .expect("progress template is a literal and cannot fail to parse")
-            .progress_chars("█▉▊▋▌▍▎▏  "),
-    );
+    // A hidden target makes every update a no-op, so the monitor loop below
+    // stays identical in both modes. No spinner frames reach a log.
+    let pb = if quiet {
+        ProgressBar::hidden()
+    } else {
+        let pb = ProgressBar::new(100);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template("{spinner:.green} [{bar:40.cyan/blue}] {pos:>3}% {msg}")
+                .expect("progress template is a literal and cannot fail to parse")
+                .progress_chars("█▉▊▋▌▍▎▏  "),
+        );
+        pb
+    };
 
     // Monitor loop
     let mut stats_rx = rx;
@@ -101,9 +118,11 @@ pub async fn run_headless(cfg: Config) -> anyhow::Result<()> {
     let _ = engine_handle.await;
 
     pb.finish_with_message("Complete");
-    println!();
+    if !quiet {
+        println!();
+    }
 
-    // Print summary from the authoritative counters.
+    // Print summary from the authoritative counters. Never gated by `quiet`.
     let final_snap = stats.snapshot();
     print_summary(&final_snap);
 

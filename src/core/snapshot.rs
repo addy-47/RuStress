@@ -17,7 +17,7 @@ pub struct StatsSnapshot {
     /// Per-request results evicted from the retention ring buffer.
     pub dropped_results: u64,
 
-    /// Pre-calculated percentiles (microseconds).
+    /// Pre-calculated service-time percentiles, in milliseconds.
     pub p50_service_ms: f64,
     pub p90_service_ms: f64,
     pub p95_service_ms: f64,

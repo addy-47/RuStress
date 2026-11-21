@@ -5,7 +5,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::core::config::{Config, Mode};
-use crate::core::constants::STATS_UPDATE_INTERVAL_MS;
+use crate::core::constants::{DRAIN_GRACE_SECS, STATS_UPDATE_INTERVAL_MS};
 use crate::runner::client::build_client;
 use crate::runner::executor::{execute_http, execute_script};
 use crate::runner::ramp::current_rps;
@@ -52,11 +52,14 @@ impl LoadEngine {
         }
         let client = build_client(&cfg)?;
         let permits = Arc::new(tokio::sync::Semaphore::new(cfg.max_concurrency as usize));
+        // One engine: two would duplicate function registration and keep two
+        // independent compiled and file-cache maps for the same templates.
+        let template_engine = Arc::new(TemplateEngine::new());
 
         Ok(Self {
-            prepared: PreparedRequest::new(&cfg, &TemplateEngine::new())?,
+            prepared: PreparedRequest::new(&cfg, &template_engine)?,
             client,
-            template_engine: Arc::new(TemplateEngine::new()),
+            template_engine,
             stats: Arc::new(RunStats::new(updates)),
             permits,
             cfg: Arc::new(cfg),
@@ -77,6 +80,10 @@ impl LoadEngine {
             Mode::Rps => self.run_rps(cancel.clone()).await,
         }
 
+        // One final frame after either mode has fully drained. The ticker's
+        // cancellation frame fires before Users-mode handles finish, so without
+        // this the dashboard can end on a stale, undercounting snapshot.
+        self.stats.publish_snapshot();
         ticker.abort();
     }
 
@@ -157,9 +164,18 @@ impl LoadEngine {
                 let _admitted = InflightGuard::admit(&stats);
 
                 if cfg.command.is_some() {
-                    execute_script(&cfg, &engine, &ctx, scheduled, &stats).await;
+                    execute_script(&cfg, &engine, &ctx, scheduled, &stats, cancel.clone()).await;
                 } else {
-                    execute_http(&client, &prepared, &engine, &ctx, scheduled, &stats).await;
+                    execute_http(
+                        &client,
+                        &prepared,
+                        &engine,
+                        &ctx,
+                        scheduled,
+                        &stats,
+                        cancel.clone(),
+                    )
+                    .await;
                 }
 
                 if cfg.think_time_ms > 0 {
@@ -203,7 +219,6 @@ impl LoadEngine {
         }
 
         self.await_drain().await;
-        self.stats.publish_snapshot();
     }
 
     /// Resynchronise the schedule after the generator falls behind.
@@ -240,7 +255,7 @@ impl LoadEngine {
             }
             match self.permits.clone().try_acquire_owned() {
                 Ok(permit) => {
-                    self.spawn_scheduled(*next_request_time, permit);
+                    self.spawn_scheduled(*next_request_time, permit, cancel.clone());
                 }
                 Err(_) => self.stats.record_scheduled_drop(),
             }
@@ -249,7 +264,12 @@ impl LoadEngine {
     }
 
     /// Spawn one open-loop request holding an owned concurrency permit.
-    fn spawn_scheduled(&self, scheduled: Instant, permit: tokio::sync::OwnedSemaphorePermit) {
+    fn spawn_scheduled(
+        &self,
+        scheduled: Instant,
+        permit: tokio::sync::OwnedSemaphorePermit,
+        cancel: CancellationToken,
+    ) {
         let client = self.client.clone();
         let engine = Arc::clone(&self.template_engine);
         let stats = Arc::clone(&self.stats);
@@ -266,16 +286,28 @@ impl LoadEngine {
             let _permit = permit;
             let _admitted = admitted;
             if cfg.command.is_some() {
-                execute_script(&cfg, &engine, &ctx, scheduled, &stats).await;
+                execute_script(&cfg, &engine, &ctx, scheduled, &stats, cancel).await;
             } else {
-                execute_http(&client, &prepared, &engine, &ctx, scheduled, &stats).await;
+                execute_http(&client, &prepared, &engine, &ctx, scheduled, &stats, cancel).await;
             }
         });
     }
 
     /// Wait for all in-flight requests to finish after the schedule ends.
+    ///
+    /// The grace period is a backstop: requests now observe cancellation and
+    /// release their drain permit promptly. It exists so no future execution
+    /// path can hold terminal teardown hostage to a hung task.
     async fn await_drain(&self) {
+        let started = Instant::now();
         while self.stats.inflight_count() > 0 {
+            if started.elapsed() >= Duration::from_secs(DRAIN_GRACE_SECS) {
+                tracing::warn!(
+                    outstanding = self.stats.inflight_count(),
+                    "drain grace period expired; abandoning outstanding requests"
+                );
+                break;
+            }
             tokio::time::sleep(Duration::from_millis(DRAIN_POLL_INTERVAL_MS)).await;
         }
     }

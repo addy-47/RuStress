@@ -71,6 +71,16 @@ pub struct Cli {
     #[arg(short = 'H', long, action = clap::ArgAction::Append)]
     pub header: Vec<String>,
 
+    /// Cookie header value (`name=value; name2=value2`), repeatable
+    #[arg(long)]
+    pub cookie: Vec<String>,
+
+    /// Suppress the banner, progress bar and configuration preamble
+    ///
+    /// The final summary and the measurement-validity warning are still printed.
+    #[arg(short, long, visible_alias = "no-progress")]
+    pub quiet: bool,
+
     /// Output file prefix for reports
     #[arg(long)]
     pub out: Option<String>,
@@ -180,16 +190,68 @@ impl Cli {
             cfg.pool_idle_timeout_secs = t;
         }
 
-        // Parse headers
+        // Parse headers. A header without ':' used to be silently ignored, so
+        // an auth header could vanish while the run reported a clean config.
         for h in &self.header {
-            if let Some((key, value)) = h.split_once(':') {
-                cfg.headers
-                    .insert(key.trim().to_string(), value.trim().to_string());
+            let (key, value) = h.split_once(':').unwrap_or((h.as_str(), ""));
+            cfg.headers
+                .insert(key.trim().to_string(), value.trim().to_string());
+        }
+
+        // `--cookie` is a raw Cookie header value: one or more `name=value`
+        // pairs separated by ';'. It is applied after -H so it wins, and it
+        // replaces every case variant of a Cookie key already in the config.
+        if !self.cookie.is_empty() {
+            let mut pairs = Vec::new();
+            for raw in &self.cookie {
+                match parse_cookie_header(raw) {
+                    Ok(mut parsed) => pairs.append(&mut parsed),
+                    Err(e) => {
+                        eprintln!("{e}");
+                        std::process::exit(2);
+                    }
+                }
             }
+            cfg.headers
+                .retain(|name, _| !name.eq_ignore_ascii_case("cookie"));
+            cfg.headers.insert("Cookie".to_string(), pairs.join("; "));
         }
 
         cfg
     }
+}
+
+/// Parse one `--cookie` argument into validated `name=value` pairs.
+///
+/// `split_once('=')` is deliberate: a base64 value such as `abc==` keeps its
+/// padding. Invalid pairs are errors, never silently skipped.
+fn parse_cookie_header(raw: &str) -> anyhow::Result<Vec<String>> {
+    let mut pairs = Vec::new();
+    for segment in raw.split(';') {
+        let segment = segment.trim();
+        if segment.is_empty() {
+            continue;
+        }
+        let (name, value) = segment
+            .split_once('=')
+            .ok_or_else(|| anyhow::anyhow!("invalid --cookie '{raw}': expected name=value"))?;
+        let (name, value) = (name.trim(), value.trim());
+        if name.is_empty() || value.is_empty() {
+            anyhow::bail!("invalid --cookie '{raw}': a pair needs a name and a value");
+        }
+        if name.contains('\r')
+            || name.contains('\n')
+            || value.contains('\r')
+            || value.contains('\n')
+        {
+            anyhow::bail!("invalid --cookie '{raw}': control characters are not allowed");
+        }
+        pairs.push(format!("{name}={value}"));
+    }
+    if pairs.is_empty() {
+        anyhow::bail!("invalid --cookie '{raw}': no name=value pairs");
+    }
+    Ok(pairs)
 }
 
 /// Load a Config from a TOML file the user named explicitly.
@@ -202,4 +264,39 @@ fn load_config_file(path: &str) -> anyhow::Result<Config> {
         .map_err(|e| anyhow::anyhow!("failed to read config file '{path}': {e}"))?;
     toml::from_str::<Config>(&contents)
         .map_err(|e| anyhow::anyhow!("failed to parse config file '{path}': {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_cookie_header;
+
+    #[test]
+    fn a_cookie_value_may_hold_several_pairs() {
+        let pairs = parse_cookie_header("sid=abc; theme=dark").expect("valid cookie");
+        assert_eq!(pairs, vec!["sid=abc", "theme=dark"]);
+    }
+
+    #[test]
+    fn base64_padding_is_not_split_away() {
+        let pairs = parse_cookie_header("token=abc==").expect("valid cookie");
+        assert_eq!(pairs, vec!["token=abc=="]);
+    }
+
+    #[test]
+    fn a_pair_without_an_equals_sign_is_rejected() {
+        assert!(parse_cookie_header("session").is_err());
+    }
+
+    #[test]
+    fn empty_names_and_values_are_rejected() {
+        assert!(parse_cookie_header("=value").is_err());
+        assert!(parse_cookie_header("name=").is_err());
+        assert!(parse_cookie_header("").is_err());
+    }
+
+    #[test]
+    fn control_characters_are_rejected_before_reach_reqwest() {
+        assert!(parse_cookie_header("name=va\rlue").is_err());
+        assert!(parse_cookie_header("na\nme=value").is_err());
+    }
 }

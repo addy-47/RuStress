@@ -38,7 +38,10 @@ impl LatencyHistogram {
         hist.saturating_record(value_us);
     }
 
-    /// Get value at a given quantile (0.0–100.0).
+    /// Get the value at a quantile fraction in the range 0.0–1.0.
+    ///
+    /// Passing 50.0 instead of 0.5 clamps every percentile to the maximum —
+    /// the P0 quantile-scale bug this API must not invite again.
     pub fn value_at_quantile(&self, quantile: f64) -> u64 {
         let hist = self.inner.lock();
         hist.value_at_quantile(quantile)

@@ -58,17 +58,16 @@ impl Theme {
     }
 
     pub fn detect_dark_mode() -> bool {
-        if let Ok(val) = std::env::var("COLORFGBG") {
-            if let Some(parts) = val.rsplit_once(';') {
-                if let Ok(bg) = parts.1.parse::<i32>() {
-                    return !(7..234).contains(&bg);
-                }
-            }
+        if let Ok(val) = std::env::var("COLORFGBG")
+            && let Some(parts) = val.rsplit_once(';')
+            && let Ok(bg) = parts.1.parse::<i32>()
+        {
+            return !(7..234).contains(&bg);
         }
-        if let Ok(val) = std::env::var("COLORTERM") {
-            if val.contains("dark") {
-                return true;
-            }
+        if let Ok(val) = std::env::var("COLORTERM")
+            && val.contains("dark")
+        {
+            return true;
         }
         true
     }
